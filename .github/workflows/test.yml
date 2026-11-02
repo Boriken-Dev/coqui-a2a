@@ -1,0 +1,64 @@
+name: Test
+
+# On demand only: workflow_dispatch (optionally at a ref), or called by the release workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test (branch, tag, or SHA)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to test (branch, tag, or SHA)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        toolchain: [stable, "1.89"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  sdk:
+    # The official JavaScript SDK, unmodified, through the loopback command to an agent on a real link.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cargo build --all-features --bins --examples
+      - run: npm install --prefix sdk @a2a-js/sdk@1.3.0
+      - run: node scripts/sdk-check.mjs
+        env:
+          COQUI_A2A_BIN: target/debug/coqui-a2a
+          COQUI_A2A_ECHO: target/debug/examples/echo_server
+          A2A_JS_SDK_DIR: sdk

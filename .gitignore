@@ -1,0 +1,18 @@
+# Dotfiles are opt-in.
+/.*
+!/.gitignore
+!/.gitattributes
+!/.github/
+
+# Agent config and personal overrides, at any depth.
+.agents
+CLAUDE*
+.claude
+*.local.*
+
+# Rust. The command is a binary, so Cargo.lock is committed.
+/target/
+
+/site/
+node_modules/
+/sdk/
