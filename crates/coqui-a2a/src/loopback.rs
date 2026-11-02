@@ -1820,6 +1820,17 @@ mod tests {
             .map(str::to_owned)
     }
 
+    /// Ends every link when a test does, a failing assertion included, so the scope can end.
+    struct Ends<'a>(&'a [&'a CardPeer]);
+
+    impl Drop for Ends<'_> {
+        fn drop(&mut self) {
+            for peer in self.0 {
+                peer.over.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn attached(hub: &Hub, link: u64) {
         while hub.link() != Some(link) {
             thread::sleep(Duration::from_millis(1));
@@ -1838,7 +1849,9 @@ mod tests {
             CardPeer::new("third"),
         );
         let limits = Limits::default();
+        let peers = [&first, &second, &third];
         thread::scope(|scope| {
+            let _ends = Ends(&peers);
             scope.spawn(|| Mux::run(&first, Side::Dialed, limits, None, |mux| hub.attach(mux)));
             attached(&hub, 0);
             for _ in 0..5 {
@@ -1866,7 +1879,6 @@ mod tests {
             scope.spawn(|| Mux::run(&third, Side::Dialed, limits, None, |mux| hub.attach(mux)));
             attached(&hub, 2);
             assert_eq!(card_name(address).as_deref(), Some("third"));
-            third.over.store(true, Ordering::SeqCst);
         });
     }
 }

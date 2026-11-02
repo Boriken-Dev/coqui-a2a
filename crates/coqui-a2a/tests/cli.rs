@@ -7,7 +7,7 @@ mod support;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -127,6 +127,25 @@ fn started_with_token(command: Command) -> (Running, String, PathBuf) {
     (running, endpoint, PathBuf::from(line.trim()))
 }
 
+/// Runs it to its end, which a command that went on to serve would never reach.
+fn finished(command: &mut Command) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + WAIT;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the command went on running");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
 /// Posts until the command has dialed and proved itself, which is 503 until then.
 fn answered(endpoint: &str, extra: &str) -> (u16, String) {
     let until = Instant::now() + WAIT;
@@ -219,12 +238,7 @@ fn a_token_file_that_will_not_do_stops_the_command_before_it_serves() {
     let scratch = Scratch::new("bad");
     let host = host_for(&scratch.0.join("client.pem"));
     let refused = |file: &Path, what: &str| {
-        let output = command(&scratch, &host)
-            .arg("--token-file")
-            .arg(file)
-            .stderr(Stdio::piped())
-            .output()
-            .unwrap();
+        let output = finished(command(&scratch, &host).arg("--token-file").arg(file));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{what}: {stderr}");
         assert!(output.stdout.is_empty(), "{what}: nothing is served");
@@ -279,12 +293,12 @@ fn no_token_is_asked_for_by_name_and_then_serves_anyone() {
 fn any_paired_peer_is_asked_for_by_name_and_goes_to_the_trust_store() {
     let scratch = Scratch::new("paired");
     let host = host_for(&scratch.0.join("client.pem"));
-    let missing = Command::new(COMMAND)
-        .env("COQUI_AGENTIC_PEER_HOME", &scratch.0)
-        .env_remove("COQUI_A2A_TOKEN_FILE")
-        .args(["loopback", "--no-token", "--url", host.url().as_str()])
-        .output()
-        .unwrap();
+    let missing = finished(
+        Command::new(COMMAND)
+            .env("COQUI_AGENTIC_PEER_HOME", &scratch.0)
+            .env_remove("COQUI_A2A_TOKEN_FILE")
+            .args(["loopback", "--no-token", "--url", host.url().as_str()]),
+    );
     assert_eq!(missing.status.code(), Some(2));
     assert!(missing.stdout.is_empty());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--peer"));
@@ -369,11 +383,7 @@ fn the_flags_of_the_relay_reach_it() {
     let host = host_for(&scratch.0.join("client.pem"));
 
     // An origin no browser sends is a mistake to say at once.
-    let output = command(&scratch, &host)
-        .args(["--no-token", "--allow-origin", "*"])
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = finished(command(&scratch, &host).args(["--no-token", "--allow-origin", "*"]));
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("origin"));

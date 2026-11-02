@@ -573,6 +573,7 @@ fn a_bearer_token_is_required_of_every_request_exactly() {
                 "Authorization: Bearer\r\n",
                 "Authorization: Bearer \r\n",
                 "Authorization: Basic s3cret\r\n",
+                "Authorization: Digest s3cret\r\n",
                 "Authorization: s3cret\r\n",
                 "Authorization: Bearer caf\u{e9}\r\n",
                 "Authorization: Bearer s3cret\r\nAuthorization: Bearer wrong\r\n",
