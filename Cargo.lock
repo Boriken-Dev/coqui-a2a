@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=24dc05d9cc478feebff770f3e7852c32f76748c5#24dc05d9cc478feebff770f3e7852c32f76748c5"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=33be56624cd44f0948468ab2e0c1fb53b5ea5de1#33be56624cd44f0948468ab2e0c1fb53b5ea5de1"
 dependencies = [
  "coqui-peer",
  "coqui-peer-webcrypto",
@@ -418,8 +418,9 @@ dependencies = [
 [[package]]
 name = "coqui-web"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-web?rev=4dc609e5c5f23ccbda993e3e126b8d13938648a6#4dc609e5c5f23ccbda993e3e126b8d13938648a6"
+source = "git+https://github.com/Boriken-Dev/coqui-web?rev=6fd0ca3446e7702d2dd323824a6b97b31851d665#6fd0ca3446e7702d2dd323824a6b97b31851d665"
 dependencies = [
+ "mio",
  "rustls",
  "tungstenite",
  "url",
