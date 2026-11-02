@@ -31,8 +31,8 @@ An Agent Card announces the binding with one entry of `supportedInterfaces`:
 A link is a proven, sealed connection between two peers that carries named, ordered, flow-controlled streams. It is specified, with its frames, in [`docs/link.md` of coqui-agentic-peer](https://boriken-dev.github.io/coqui-agentic-peer/link/). This binding needs only this of it:
 
 - a stream is opened with a protocol token and carries whole messages in order, in each direction;
-- either side can stop sending and go on reading (`finish`), which the other side sees as the end of the messages after everything that was sent;
-- a stream ends in one of five ways, each distinct: closed in order, `refused`, `broken`, `superseded`, `revoked`, or the link was lost;
+- either side can stop sending and go on reading (`finish`), which the other side sees as the end of the messages after everything that was sent. Only `finish` says that what was sent is whole: a stream or a link closed in order does not;
+- a stream ends in one of six ways, each distinct: closed in order, `refused`, `broken`, `superseded`, `revoked`, or the link was lost;
 - a peer that has proved its key may open `link/1`, which answers with the protocol tokens that peer may open. A token is a **grant** on that peer's entry in one trust store, so a peer paired once for another protocol gets `a2a/1` by a grant, without a second pairing.
 
 The side that opens a stream is the **client** of the operation on it, and the side that accepts it is the **server**. Either end of a link can be either, by opening or accepting.
@@ -47,11 +47,13 @@ A client performs an operation like this:
 4. read the [responses](#messages) until the stream ends;
 5. close the stream.
 
+A server may answer and close before the client's `finish` goes out. That `finish` then fails, and the answer already read or waiting to be read still stands.
+
 A server, for each stream opened with `a2a/1`:
 
 1. read one message, waiting at most its request timeout (10 seconds by default);
 2. answer it with one response, or with a series of them for a [streaming operation](#streaming);
-3. `finish` the stream, then close it.
+3. `finish` the stream, then close it. It MUST NOT `finish` a stream whose answer it could not send whole.
 
 The server MUST NOT read a second operation from a stream. A message that follows the request is an error: the server closes the stream with the link's `refused` and the reason `one operation per stream`, and the client reads that as the operation being refused. A server MAY notice it late (it looks between the items it sends, and at least every 100 milliseconds on a quiet stream).
 
@@ -114,7 +116,7 @@ The data model is A2A 1.0's, as ProtoJSON writes it, which is the form every A2A
 | Binary data | `Part.raw` is a base64 string (RFC 4648, standard alphabet, with padding). Nothing is added: the binding has no binary framing, and a file larger than the link's message bound is sent by `url`, or in `TaskArtifactUpdateEvent` chunks with `append` |
 | `oneof` groups | exactly one member is present: a Part holds one of `text`, `raw`, `url`, `data`; a SendMessageResponse holds `task` or `message`; a StreamResponse holds one of `task`, `message`, `statusUpdate`, `artifactUpdate` |
 | Absent and empty | an absent optional field is omitted, never `null`; `ListTasks` with `includeArtifacts` false omits `artifacts` from each task |
-| Unknown members | ignored when reading and kept when relaying |
+| Unknown members | ignored when reading and kept when relaying, except in a card a relay serves ([The Agent Card](#the-agent-card)) |
 | `google.protobuf.Struct` and `Any` | any JSON value |
 | Required fields | a server SHOULD reject a request that lacks them with `InvalidParamsError` |
 
@@ -134,9 +136,10 @@ Defined names:
 
 | Name | Meaning |
 | --- | --- |
-| `a2a-version` | the A2A version the client uses. The server accepts major version 1 (`1`, `1.0`, `1.2`) and otherwise answers `VersionNotSupportedError`. Absent means no preference |
+| `a2a-version` | the A2A version the client uses. The server accepts major version 1 (`1`, `1.0`, `1.2`) and otherwise answers `VersionNotSupportedError`; when several values are joined, every one has to be major version 1. Absent means no preference |
 | `a2a-extensions` | comma-separated extension URIs the client uses. If the card lists an extension with `required: true` that is not named here the server answers `ExtensionSupportRequiredError` |
 | `authorization` | the agent's own credential, if the agent wants one in addition to the link's proof. See [Authentication](#authentication-and-authorization) |
+| the name an `apiKeySecurityScheme` gives | that credential, lower-cased as every name is. See [Authentication](#authentication-and-authorization) |
 
 **Reserved by this binding:** the name `a2a-service-parameters` as the request member; the method name `GetAgentCard`; the prefix `coqui-` for service parameters, and `coqui-agentic-peer` anywhere in a name; the protocol tokens `a2a/N`. Names with the prefix `a2a-` belong to A2A.
 
@@ -176,10 +179,10 @@ Some outcomes arrive as the end of the stream, because they happen before or ben
 | `refused` at the open, with a reason | the peer serves no `a2a/1`, or does not serve it to this key: not granted. The reason is for a person |
 | `refused`, reason `one operation per stream` | the client sent a second message |
 | `revoked`, with a reason | the grant went while the operation ran. Nothing more will come |
-| `broken` | a bound was broken, such as a message past the link's size: the operation is not complete |
+| `broken` | a bound was broken, such as a message past the link's size, or a client that left its window full for longer than the server waits: the operation is not complete |
 | `superseded` | not used by this binding |
 | the link was lost | the operation is not complete |
-| closed in order with no response | not complete (a server always answers before it closes) |
+| closed in order with no `finish`, whatever came before it | not complete (a server finishes before it closes, after a whole answer and only then) |
 
 A client MUST NOT treat any of these as a result.
 
@@ -190,9 +193,9 @@ A client MUST NOT treat any of these as a result.
 - **Order.** Items are sent in the order the agent generated them, and a stream delivers in order and never skips. A client therefore applies items in the order it reads them. Nothing is ordered across streams: two operations running at once have no order between them.
 - **First item.** For `SendStreamingMessage`, a `task` or a `message`. For `SubscribeToTask`, the `task` as it now is.
 - **Message-only.** If the first item is a `message`, it is also the last: the server finishes the stream after it.
-- **Completion.** The server finishes the stream, then closes it, after the item that puts the task in a terminal state (`TASK_STATE_COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`), or when the agent has no more items. A client reading the end of the messages after a `finish` knows the series is whole. A stream that ends any other way ([above](#what-the-link-says-instead)) is **not** complete, and the client MUST say so and not present what it has as the whole.
+- **Completion.** The server finishes the stream, then closes it, after the item that puts the task in a terminal state (`TASK_STATE_COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`), or when the agent has no more items. A client reading the end of the messages after a `finish` knows the series is whole, and it has to ask whether that is what it read: the end of the messages reads the same after a stream closed in order. A stream that ends any other way ([above](#what-the-link-says-instead)) is **not** complete, and the client MUST say so and not present what it has as the whole.
 - **Errors.** An error before the first item is the stream's one response. An error after items is the last message, and the stream ends after it. A client reads an `error` response as the end of the stream.
-- **Backpressure.** Each stream has a window of credit, so a client that reads slowly stalls only its own stream and no other operation or protocol on the link.
+- **Backpressure.** Each stream has a window of credit, so a client that reads slowly stalls only its own stream and no other operation or protocol on the link. The server waits for credit, and items are neither dropped nor reordered. A server MAY give up on a client that gives no credit for a time of its choosing (30 seconds by default), and then closes the stream with `broken` and does not `finish` it.
 - **Client leaves.** If the client closes its end, the server stops sending and releases the agent. This does **not** cancel the task: `CancelTask` does. A client that wants the rest reconnects as below.
 - **Reconnection.** **The link replays nothing.** After a link or stream is lost, the client reads the task with `GetTask` and follows it with `SubscribeToTask`, whose first item is the task's state at that moment, so nothing is lost between the two. A client MUST NOT resend an unacknowledged `SendMessage` or `SendStreamingMessage` on its own: it cannot know whether the agent got it. It MAY resend with the same `messageId` when the agent is known to treat it as idempotent (A2A section 3.3.1). Deciding to reconnect and when is the host's; the binding adds no timer.
 - **Silence.** A stream may be quiet for hours. A client has no per-item timeout by default. A link with a heartbeat tells a dead peer from a quiet one.
@@ -212,7 +215,7 @@ The standard binding serves the card at `/.well-known/agent-card.json`. A link h
 
 - Any peer that may open `a2a/1` may call it. A peer that may not never reaches it.
 - The server puts an interface entry with this binding first in `supportedInterfaces`, and sets `capabilities.pushNotifications` to `false`.
-- `GetAgentCard` is not an A2A operation and is not offered over HTTP by a relay; a relay reads the card with it and serves it at the well-known path with its own `supportedInterfaces`.
+- `GetAgentCard` is not an A2A operation and is not offered over HTTP by a relay; a relay reads the card with it and serves it at the well-known path with its own `supportedInterfaces`. A client takes such a card to be the relay's own, so a relay keeps only what says what the agent is: it drops any member it does not know, such as the `url` and `additionalInterfaces` of earlier versions of A2A, a signature, since the card is not the one signed, and any scheme that names a URL to send a credential to, and it says `capabilities.pushNotifications` is `false`.
 - `GetExtendedAgentCard` works as A2A section 3.1.11 says. The caller is the peer the link proved, plus any credential the agent also asks for.
 
 A card MAY carry `securitySchemes` and `securityRequirements`. They describe what the agent asks for **in addition** to the link; the link's proof is never listed there, since A2A's schemes have no way to name an in-band key proof.
@@ -221,7 +224,16 @@ A card MAY carry `securitySchemes` and `securityRequirements`. They describe wha
 
 **The link's proof is the authentication.** Before any byte of this binding is read, the link has proved which key each side holds and sealed everything after it. The server learns the peer's id from the proof, never from a request, and the link's grants, kept per peer by the host, decide whether the peer may open `a2a/1` at all and are checked again while a stream runs. The binding has no login, no token exchange and no certificate of its own.
 
-An agent that also wants its own credential (a bearer token, an OAuth access token) gets it in the `authorization` [service parameter](#service-parameters), and declares the scheme in its card's `securitySchemes` as for any binding. The binding does not bypass that control: a request without the credential gets `UnauthenticatedError`, whose `ErrorInfo.metadata` may hold a `challenge` string; an authenticated caller who may not do the thing gets `PermissionDeniedError`. A credential is never put in an error or a log.
+An agent that also wants its own credential declares the scheme in its card's `securitySchemes` as for any binding, and the credential travels in a [service parameter](#service-parameters):
+
+| The card's scheme | The service parameter |
+| --- | --- |
+| `httpAuthSecurityScheme` | `authorization`, as the HTTP header's value |
+| `oauth2SecurityScheme`, `openIdConnectSecurityScheme` | `authorization`, `Bearer` and the access token, which the client got from the scheme's URLs by itself: nothing about getting one travels over the link |
+| `apiKeySecurityScheme` | the name the scheme gives, wherever its `location` says, since a link has no query string and no cookies |
+| `mtlsSecurityScheme` | none: a link shows no certificate of a client's to the agent, so an agent that insists on one cannot be reached over this binding, and does not offer it |
+
+The binding does not bypass that control: a request without the credential gets `UnauthenticatedError`, whose `ErrorInfo.metadata` may hold a `challenge` string, which is how a challenge reaches a client; an authenticated caller who may not do the thing gets `PermissionDeniedError`. A credential is never put in an error or a log.
 
 **Authorization is the agent's**, per caller. The caller's identity is the proven peer id and the claims the host stored for that peer. `ListTasks` MUST return only the caller's tasks, and a task another caller owns is `TaskNotFoundError`.
 
@@ -234,7 +246,16 @@ An agent that also wants its own credential (a bearer token, an OAuth access tok
 | Messages on a stream | one request | `refused`, `one operation per stream` |
 | Service parameters | 32 entries, names 64 bytes, values 8192 bytes | `InvalidRequestError` |
 | Message the link carries | set by the link (16 MiB) | the link breaks that stream (`broken`) and keeps the link |
-| Streams and opens | set by the link (32 per link) | the link refuses the open |
+| Streams and opens | set by the link (32 per link, 16 on one protocol, 600 opens a minute) | the link refuses the open |
+| A client that gives no credit | 30 seconds | `broken` |
+
+### Large payloads
+
+A message has to fit the link's bound, and base64 makes a file a third larger. Past that, the file goes by `Part.url`, or in `TaskArtifactUpdateEvent` chunks with `append`. A request past the server's limit is answered as above. An answer the agent makes past the link's limit is `InvalidAgentResponseError`, and a relay MAY set a lower limit of its own, with the same error. A large message on one stream holds up no other: the link carries it in parts.
+
+### Long-running tasks
+
+A task may outlive any stream. `SendMessage` blocks until the task settles, for as long as the client waits, and the link has no timer of its own. For a task that takes longer than a client will wait, set `configuration.returnImmediately` and follow it with `GetTask` or `SubscribeToTask`. A stream may be quiet for hours, a stream's end cancels nothing, and only `CancelTask` does. See [Streaming](#streaming) for what a client does when a stream is lost.
 
 A server never panics on input: bytes that are not JSON, JSON that is not a request, an unknown method, an `id` that is not a scalar, parameters of the wrong type, a batch (an array) and a second message each get an error response or the end of their own stream, and nothing else on the link is affected. An agent that fails is `InternalError` for that operation.
 
@@ -277,5 +298,9 @@ server    finish, close
 | Reconnection | none by the link; `GetTask` then `SubscribeToTask`, see [Streaming](#streaming) |
 | Completion | the server's `finish` after the last item; any other end is not complete |
 | Authentication | [Authentication and authorization](#authentication-and-authorization) |
+| Credentials declared in the card | a service parameter per scheme, tabled in [Authentication and authorization](#authentication-and-authorization) |
+| Authentication challenges | `UnauthenticatedError`, with `challenge` in its `ErrorInfo.metadata` |
+| Large payloads | [Large payloads](#large-payloads) |
+| Long-running tasks | [Long-running tasks](#long-running-tasks) |
 | Intentional deviations | [above](#intentional-differences-from-the-standard-bindings) |
 | Sample messages | [An exchange](#an-exchange) and `vectors/binding.json` |

@@ -24,7 +24,7 @@ cargo add --git https://github.com/Boriken-Dev/coqui-a2a coqui-a2a
 
 | Feature | Adds |
 | --- | --- |
-| `loopback` | the `loopback` module: an HTTP endpoint on a loopback address (`axum`, `tokio`) |
+| `loopback` | the `loopback` module: an HTTP endpoint on a loopback address (`axum`, `hyper`, `tokio`) |
 | `cli` | the `coqui-a2a` command (`loopback`, `clap`, the link's identity and TLS pieces) |
 
 A default build depends on `coqui-agentic-peer`, `coqui-web`, `serde`, `serde_json` and `time`. MSRV is Rust 1.89.
@@ -81,7 +81,7 @@ let _services = Server::new(Mute).serving(Services::default());
 
 ## Command line
 
-`coqui-a2a loopback` dials a link, proves itself with this user's identity, and serves A2A over HTTP on a loopback address. It prints the endpoint on standard output and runs until stopped.
+`coqui-a2a loopback` dials a link, proves itself with this user's identity, and serves A2A over HTTP on a loopback address. It prints the endpoint on standard output, then the file holding the bearer token every request has to show, and runs until stopped.
 
 ```sh
 coqui-a2a loopback --url ws://127.0.0.1:9000/link --peer sha256:<the agent's peer id>
@@ -91,10 +91,14 @@ coqui-a2a loopback --url ws://127.0.0.1:9000/link --peer sha256:<the agent's pee
 | --- | --- | --- |
 | `--url` | `COQUI_A2A_URL` | the link to dial |
 | `--listen` | `COQUI_A2A_LISTEN` | a loopback address, default `127.0.0.1:0`; anything else is refused |
-| `--peer` | | the remote peer's id, pinned; without it this user's paired peers are accepted |
+| `--peer` | | the remote peer's id, pinned; required unless `--any-paired-peer` is given |
+| `--any-paired-peer` | | accepts every peer paired in this user's trust store as the agent |
 | `--identity` | | this side's key file; defaults to this user's |
-| `--allow-origin` | | an `Origin` to let through; by default any request with one is refused |
-| `--token-file` | `COQUI_A2A_TOKEN_FILE` | a bearer token every request must present |
+| `--allow-origin` | | an `Origin` whose page may use the endpoint; by default any request with one is refused |
+| `--forward-header` | | a header to pass to the agent as a service parameter |
+| `--token-file` | `COQUI_A2A_TOKEN_FILE` | the file holding the bearer token; defaults to this user's, made the first time |
+| `--no-token` | | serves with no token, to every program of every user on the machine |
+| `--answer-timeout` | | seconds the agent has to say anything to an operation, default 300 |
 | `--ca-file` | | roots that must vouch for a `wss://` certificate |
 
 `COQUI_AGENTIC_PEER_HOME` places the identity and trust store. Exit status: 0 stopped, 1 failed (the proof was refused, the endpoint could not start), 2 the invocation was wrong. See the [loopback page](https://boriken-dev.github.io/coqui-a2a/loopback/).

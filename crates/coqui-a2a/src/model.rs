@@ -1,8 +1,10 @@
 //! The A2A data model, as JSON: camelCase fields and ProtoJSON enum names.
 //!
 //! The types mirror the normative schema of A2A 1.0. A field the schema leaves open (`metadata`, a
-//! part's `data`, security schemes, signatures) is a [`serde_json::Value`] and travels unread. Every
-//! object also keeps the members it does not know in `extra`, so a relay forwards what it received.
+//! part's `data`, security schemes, signatures) is a [`serde_json::Value`] and travels unread. The
+//! objects with an `extra` field keep the members they do not know in it. [`AgentProvider`],
+//! [`AgentExtension`] and [`AgentSkill`] have none and drop them, as do the one-member wrappers
+//! [`StreamResponse`] and [`SendMessageResponse`], so a relay that must keep everything carries raw JSON.
 
 use core::fmt;
 
