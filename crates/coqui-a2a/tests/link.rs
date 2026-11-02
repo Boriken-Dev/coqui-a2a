@@ -396,7 +396,8 @@ fn raw_request(
             stream.end()
         )
     });
-    stream.finish().unwrap();
+    // Fails when the server has answered and closed already, which leaves the answer to read.
+    let _ = stream.finish();
     let answer = stream.receive(Some(WAIT)).unwrap().unwrap();
     serde_json::from_slice(&answer).unwrap()
 }

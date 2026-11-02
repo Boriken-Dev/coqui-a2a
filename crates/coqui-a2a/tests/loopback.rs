@@ -810,8 +810,15 @@ fn connections_are_capped_and_one_that_sends_nothing_is_let_go() {
                 assert!(closed_within(stream, WAIT), "{name} was kept");
             }
 
-            // And the places are free again.
-            let reply = post(address, "", &rpc("1", "GetTask", &json!({ "id": "x" })));
+            // And the places are free again, a moment after those sockets closed.
+            let until = Instant::now() + WAIT;
+            let reply = loop {
+                let reply = post(address, "", &rpc("1", "GetTask", &json!({ "id": "x" })));
+                if reply.status == 200 || Instant::now() > until {
+                    break reply;
+                }
+                thread::sleep(Duration::from_millis(10));
+            };
             assert_eq!(reply.status, 200, "{}", reply.body);
         },
     );
@@ -823,12 +830,30 @@ fn a_connection_carries_one_request() {
         |config| config.with_max_connections(1),
         |address| {
             for _ in 0..5 {
-                let mut stream = started(address, "SendMessage", "again");
-                let mut bytes = Vec::new();
-                stream.read_to_end(&mut bytes).unwrap();
-                let text = String::from_utf8_lossy(&bytes);
-                assert!(text.starts_with("HTTP/1.1 200"), "{text}");
-                assert!(text.contains("echo: again"), "{text}");
+                let until = Instant::now() + WAIT;
+                loop {
+                    let mut stream = started(address, "SendMessage", "again");
+                    let mut bytes = Vec::new();
+                    let read = stream.read_to_end(&mut bytes);
+                    // A connection kept for another request would run this into its read timeout.
+                    if let Err(error) = &read {
+                        assert!(
+                            !matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ),
+                            "the connection was kept open"
+                        );
+                    }
+                    let text = String::from_utf8_lossy(&bytes);
+                    // The place goes a moment after the socket closes, which a client can beat.
+                    if text.starts_with("HTTP/1.1 503") && Instant::now() < until {
+                        continue;
+                    }
+                    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+                    assert!(text.contains("echo: again"), "{text}");
+                    break;
+                }
             }
         },
     );
