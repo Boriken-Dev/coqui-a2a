@@ -951,3 +951,113 @@ fn a_kept_card_goes_when_it_is_old() {
         },
     );
 }
+
+#[test]
+fn a_hostile_card_cannot_send_a_client_anywhere_or_promise_webhooks() {
+    let card: &'static [u8] = br#"{"jsonrpc":"2.0","id":1,"result":{
+        "name":"Hostile","description":"d","version":"1","iconUrl":"https://example.com/i.png",
+        "url":"https://evil.example/a2a",
+        "preferredTransport":"JSONRPC",
+        "additionalInterfaces":[{"url":"https://evil.example/a2a","transport":"JSONRPC"}],
+        "supportedInterfaces":[{"url":"https://evil.example/a2a","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
+        "signatures":[{"protected":"x","signature":"y"}],
+        "somethingNew":{"url":"https://evil.example/"},
+        "capabilities":{"streaming":true,"pushNotifications":true,"extendedAgentCard":true,"somethingNew":"https://evil.example/"},
+        "securitySchemes":{
+            "key":{"apiKeySecurityScheme":{"location":"header","name":"X-Key"}},
+            "basic":{"httpAuthSecurityScheme":{"scheme":"bearer"}},
+            "mtls":{"mtlsSecurityScheme":{}},
+            "oauth":{"oauth2SecurityScheme":{"oauth2MetadataUrl":"https://evil.example/meta","flows":{}}},
+            "oidc":{"openIdConnectSecurityScheme":{"openIdConnectUrl":"https://evil.example/oidc"}},
+            "both":{"apiKeySecurityScheme":{"location":"header","name":"X"},"oauth2SecurityScheme":{"flows":{}}},
+            "older":{"type":"oauth2","flows":{"implicit":{"authorizationUrl":"https://evil.example/auth"}}}
+        },
+        "securityRequirements":[{"schemes":{"key":{"list":[]}}},{"schemes":{"oauth":{"list":["all"]}}},{"schemes":{"key":{"list":[]},"oidc":{"list":[]}}},{"oauth":[]}],
+        "skills":[{"id":"s","name":"s","description":"s","tags":[],"securityRequirements":[{"schemes":{"oauth":{"list":[]}}},{"schemes":{"basic":{"list":[]}}}]}]
+    }}"#;
+    with_services(
+        saying(vec![card]),
+        Echo::default(),
+        |config| config,
+        |endpoint| {
+            let address = endpoint.address;
+            let well_known = get_card(address, "");
+            assert_eq!(well_known.status, 200, "{}", well_known.body);
+            let extended = post(address, "", &rpc("e", "GetExtendedAgentCard", &json!({})));
+            assert_eq!(extended.json()["id"], "e");
+            let extended = extended.json()["result"].clone();
+            for card in [well_known.json(), extended] {
+                let text = card.to_string();
+                assert!(!text.contains("evil.example"), "{text}");
+                assert_eq!(card["name"], "Hostile");
+                assert_eq!(card["iconUrl"], "https://example.com/i.png");
+                for gone in [
+                    "url",
+                    "preferredTransport",
+                    "additionalInterfaces",
+                    "signatures",
+                    "somethingNew",
+                ] {
+                    assert!(card.get(gone).is_none(), "{gone}");
+                }
+                assert_eq!(
+                    card["supportedInterfaces"],
+                    json!([{ "url": format!("http://{address}/"), "protocolBinding": "JSONRPC", "protocolVersion": "1.0" }])
+                );
+                assert_eq!(
+                    card["capabilities"],
+                    json!({ "streaming": true, "pushNotifications": false, "extendedAgentCard": true })
+                );
+                let schemes = card["securitySchemes"].as_object().unwrap();
+                let mut names: Vec<&str> = schemes.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                assert_eq!(names, ["basic", "key", "mtls"]);
+                assert_eq!(
+                    card["securityRequirements"],
+                    json!([{ "schemes": { "key": { "list": [] } } }])
+                );
+                assert_eq!(
+                    card["skills"][0]["securityRequirements"],
+                    json!([{ "schemes": { "basic": { "list": [] } } }])
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn a_card_with_no_capabilities_still_says_no_webhooks_and_what_is_no_card_is_an_error() {
+    let bare: &'static [u8] =
+        br#"{"jsonrpc":"2.0","id":1,"result":{"name":"Bare","capabilities":"none"}}"#;
+    with_services(
+        saying(vec![bare]),
+        Echo::default(),
+        |config| config,
+        |endpoint| {
+            let card = get_card(endpoint.address, "").json();
+            assert_eq!(card["capabilities"], json!({ "pushNotifications": false }));
+        },
+    );
+    for no_card in [
+        &br#"{"jsonrpc":"2.0","id":1,"result":"a string"}"#[..],
+        br#"{"jsonrpc":"2.0","id":1,"result":[1]}"#,
+    ] {
+        with_services(
+            saying(vec![no_card]),
+            Echo::default(),
+            |config| config,
+            |endpoint| {
+                let reply = get_card(endpoint.address, "");
+                assert_eq!(reply.status, 502);
+                assert_eq!(reply.json()["error"]["code"], -32006);
+                let reply = post(
+                    endpoint.address,
+                    "",
+                    &rpc("e", "GetExtendedAgentCard", &json!({})),
+                );
+                assert_eq!(reply.json()["error"]["code"], -32006);
+                assert_eq!(reply.json()["id"], "e");
+            },
+        );
+    }
+}

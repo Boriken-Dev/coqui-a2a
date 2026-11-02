@@ -1284,22 +1284,68 @@ async fn asked_card(
         .map_err(|error| Box::new(rpc_error(StatusCode::BAD_GATEWAY, &Value::Null, error)))
 }
 
+/// The members of an A2A 1.0 card that say what the agent is, not where to go. What is not listed goes:
+/// `supportedInterfaces` is this endpoint's to fill, a signature covered the card as it was, and a client
+/// that reads a member of an older or later version, such as `url` or `additionalInterfaces`, must not
+/// be sent around this endpoint by it.
+const CARD_MEMBERS: [&str; 9] = [
+    "name",
+    "description",
+    "provider",
+    "version",
+    "documentationUrl",
+    "defaultInputModes",
+    "defaultOutputModes",
+    "skills",
+    "iconUrl",
+];
+/// The schemes with nowhere to send a credential. An OAuth or OpenID Connect scheme names URLs that a
+/// client of a local endpoint would take for its own, so a client needing one is set up by hand.
+const LOCAL_SCHEMES: [&str; 3] = [
+    "apiKeySecurityScheme",
+    "httpAuthSecurityScheme",
+    "mtlsSecurityScheme",
+];
+
 /// A card as this endpoint serves it, from the JSON the agent sent.
 fn rewritten(text: &str, address: SocketAddr) -> Result<Value, A2aError> {
-    let mut card = serde_json::from_str::<Value>(text)
-        .ok()
-        .filter(Value::is_object)
-        .ok_or_else(|| into_error(ClientError::Malformed("not a card")))?;
-    rewrite_card(&mut card, address);
-    Ok(card)
-}
-
-/// Points the card at this endpoint. A signature covered the original interfaces, so it goes.
-fn rewrite_card(card: &mut Value, address: SocketAddr) {
-    let Some(object) = card.as_object_mut() else {
-        return;
+    let Ok(Value::Object(mut card)) = serde_json::from_str::<Value>(text) else {
+        return Err(into_error(ClientError::Malformed("not a card")));
     };
-    object.insert(
+    let schemes = kept_schemes(card.get("securitySchemes"));
+    let mut served = serde_json::Map::new();
+    if card.contains_key("securitySchemes") {
+        served.insert("securitySchemes".to_owned(), Value::Object(schemes.clone()));
+    }
+    for name in CARD_MEMBERS {
+        if let Some(value) = card.remove(name) {
+            served.insert(name.to_owned(), value);
+        }
+    }
+    if let Some(requirements) = card.get("securityRequirements") {
+        served.insert(
+            "securityRequirements".to_owned(),
+            kept_requirements(requirements, &schemes),
+        );
+    }
+    if let Some(Value::Array(skills)) = served.get_mut("skills") {
+        for skill in skills.iter_mut().filter_map(Value::as_object_mut) {
+            if let Some(requirements) = skill.get_mut("securityRequirements") {
+                *requirements = kept_requirements(requirements, &schemes);
+            }
+        }
+    }
+    let mut capabilities = serde_json::Map::new();
+    if let Some(Value::Object(given)) = card.get("capabilities") {
+        for name in ["streaming", "extensions", "extendedAgentCard"] {
+            if let Some(value) = given.get(name) {
+                capabilities.insert(name.to_owned(), value.clone());
+            }
+        }
+    }
+    capabilities.insert("pushNotifications".to_owned(), Value::Bool(false));
+    served.insert("capabilities".to_owned(), Value::Object(capabilities));
+    served.insert(
         "supportedInterfaces".to_owned(),
         json!([{
             "url": format!("http://{address}/"),
@@ -1307,7 +1353,40 @@ fn rewrite_card(card: &mut Value, address: SocketAddr) {
             "protocolVersion": A2A_VERSION,
         }]),
     );
-    object.remove("signatures");
+    Ok(Value::Object(served))
+}
+
+/// The security schemes of a card that are one of [`LOCAL_SCHEMES`] and nothing else.
+fn kept_schemes(schemes: Option<&Value>) -> serde_json::Map<String, Value> {
+    let Some(Value::Object(schemes)) = schemes else {
+        return serde_json::Map::new();
+    };
+    schemes
+        .iter()
+        .filter(|(_, scheme)| {
+            scheme.as_object().is_some_and(|scheme| {
+                scheme.len() == 1 && LOCAL_SCHEMES.iter().any(|name| scheme.contains_key(*name))
+            })
+        })
+        .map(|(name, scheme)| (name.clone(), scheme.clone()))
+        .collect()
+}
+
+/// The requirements that name only schemes still on the card, in the form `{"schemes": {name: ...}}`.
+fn kept_requirements(requirements: &Value, schemes: &serde_json::Map<String, Value>) -> Value {
+    let Value::Array(requirements) = requirements else {
+        return json!([]);
+    };
+    requirements
+        .iter()
+        .filter(|requirement| {
+            requirement
+                .get("schemes")
+                .and_then(Value::as_object)
+                .is_some_and(|named| named.keys().all(|name| schemes.contains_key(name)))
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
