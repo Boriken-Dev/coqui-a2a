@@ -20,7 +20,7 @@ use core::task::{Context, Poll, ready};
 use core::time::Duration;
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -110,6 +110,7 @@ pub struct Config {
     write_stall: Duration,
     answer_timeout: Duration,
     max_buffered: usize,
+    card_cache: Duration,
 }
 
 impl fmt::Debug for Config {
@@ -124,6 +125,7 @@ impl fmt::Debug for Config {
             .field("write_stall", &self.write_stall)
             .field("answer_timeout", &self.answer_timeout)
             .field("max_buffered", &self.max_buffered)
+            .field("card_cache", &self.card_cache)
             .finish()
     }
 }
@@ -148,6 +150,7 @@ impl Config {
             write_stall: Duration::from_secs(30),
             answer_timeout: Duration::from_secs(300),
             max_buffered: 64 << 20,
+            card_cache: Duration::from_secs(60),
         })
     }
 
@@ -212,6 +215,14 @@ impl Config {
     #[must_use]
     pub fn with_max_buffered(mut self, bytes: usize) -> Self {
         self.max_buffered = bytes;
+        self
+    }
+
+    /// Sets how long the card is served without asking the agent again, 60 seconds by default, so
+    /// reading it does not spend the link's allowance of streams. Zero asks every time.
+    #[must_use]
+    pub fn with_card_cache(mut self, limit: Duration) -> Self {
+        self.card_cache = limit;
         self
     }
 }
@@ -522,7 +533,8 @@ fn error_text(id: &str, error: &A2aError) -> String {
 /// Where the endpoint's operations go: to whichever link is attached.
 #[derive(Default)]
 pub struct Hub {
-    jobs: Mutex<Option<std_mpsc::Sender<Job>>>,
+    jobs: Mutex<Option<(u64, std_mpsc::Sender<Job>)>>,
+    links: AtomicU64,
     closed: AtomicBool,
 }
 
@@ -555,7 +567,17 @@ impl Hub {
     /// Queues `job`. `false` when no link is attached.
     fn submit(&self, job: Job) -> bool {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        jobs.as_ref().is_some_and(|sender| sender.send(job).is_ok())
+        jobs.as_ref()
+            .is_some_and(|(_, sender)| sender.send(job).is_ok())
+    }
+
+    /// Which link is attached, if any: a number no other link of this hub has had.
+    fn link(&self) -> Option<u64> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(link, _)| *link)
     }
 
     /// Ends the hub for good: a running [`Hub::attach`] returns, a later one returns at once, and
@@ -569,7 +591,8 @@ impl Hub {
     /// over new operations.
     pub fn attach<C: Channel>(&self, mux: &Mux<'_, C>) {
         let (sender, jobs) = std_mpsc::channel();
-        *self.jobs.lock().unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        let link = self.links.fetch_add(1, Ordering::SeqCst);
+        *self.jobs.lock().unwrap_or_else(PoisonError::into_inner) = Some((link, sender));
         thread::scope(|scope| {
             loop {
                 match jobs.recv_timeout(POLL) {
@@ -592,8 +615,14 @@ impl Hub {
                 }
             }
         });
+        // A link attached since has taken the place, and this one's end is not that one's.
+        {
+            let mut attached = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            if attached.as_ref().is_some_and(|(held, _)| *held == link) {
+                *attached = None;
+            }
+        }
         // Operations that arrived while the link was ending are answered, not left waiting.
-        *self.jobs.lock().unwrap_or_else(PoisonError::into_inner) = None;
         while let Ok(job) = jobs.try_recv() {
             job.refuse(&A2aError::new(ErrorKind::Internal, "the link is down"));
         }
@@ -656,6 +685,17 @@ struct Shared {
     answer_timeout: Duration,
     budget: Arc<Semaphore>,
     max_buffered: usize,
+    card_cache: Duration,
+    // Held across asking the agent, so those waiting take what that brings rather than asking too.
+    card: Arc<tokio::sync::Mutex<Option<CachedCard>>>,
+}
+
+/// A card as served, and what it may be served for again.
+struct CachedCard {
+    link: u64,
+    parameters: ServiceParameters,
+    taken: Instant,
+    card: Value,
 }
 
 impl Loopback {
@@ -683,6 +723,8 @@ impl Loopback {
                 config.max_buffered.min(Semaphore::MAX_PERMITS),
             )),
             max_buffered: config.max_buffered,
+            card_cache: config.card_cache,
+            card: Arc::default(),
         };
         let app = Router::new()
             .route("/", post(rpc))
@@ -876,14 +918,19 @@ fn plain(status: StatusCode, text: &'static str) -> HttpResponse {
 /// Refuses what a web page or a rebinding attack would send, before anything else looks at it.
 async fn guard(State(state): State<Shared>, request: HttpRequest, next: Next) -> HttpResponse {
     let headers = request.headers();
-    if headers.contains_key(header::ORIGIN) {
-        let allowed = headers
-            .get(header::ORIGIN)
-            .and_then(|origin| origin.to_str().ok())
-            .is_some_and(|origin| state.origins.iter().any(|allowed| allowed == origin));
-        if !allowed {
-            return plain(StatusCode::FORBIDDEN, "an Origin is not accepted here");
+    match headers.get(header::ORIGIN) {
+        Some(origin) => {
+            let allowed = origin
+                .to_str()
+                .is_ok_and(|origin| state.origins.iter().any(|allowed| allowed == origin));
+            if !allowed {
+                return plain(StatusCode::FORBIDDEN, "an Origin is not accepted here");
+            }
         }
+        None if from_a_page(headers) => {
+            return plain(StatusCode::FORBIDDEN, "a web page is not accepted here");
+        }
+        None => {}
     }
     let host_ok = headers
         .get(header::HOST)
@@ -902,6 +949,19 @@ async fn guard(State(state): State<Shared>, request: HttpRequest, next: Next) ->
         }
     }
     next.run(request).await
+}
+
+/// Whether a browser sent this for a page, as a page's GET does with no `Origin`: `<img src>`, a
+/// `no-cors` fetch or a navigation. A browser's `Sec-Fetch-*` cannot be set by script, and it sends them
+/// to a loopback address. Node's `fetch` sends `Sec-Fetch-Mode: cors` and nothing else of them, which
+/// says nothing about a page.
+fn from_a_page(headers: &HeaderMap) -> bool {
+    ["sec-fetch-site", "sec-fetch-dest", "sec-fetch-user"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+        || headers
+            .get("sec-fetch-mode")
+            .is_some_and(|mode| mode != "cors")
 }
 
 /// `127.0.0.1:port`, `[::1]:port` or `localhost:port`, with the port this endpoint listens on.
@@ -1158,12 +1218,51 @@ fn down(id: &Value) -> HttpResponse {
     )
 }
 
-/// The card the link's agent serves, with `supportedInterfaces` naming this endpoint.
+/// The card the link's agent serves, with `supportedInterfaces` naming this endpoint. It is kept for a
+/// while for as long as the link lasts, unless what it was asked with could be a credential: then it may
+/// differ per caller, and it is not for the next one.
 async fn card(State(state): State<Shared>, headers: HeaderMap) -> HttpResponse {
     let parameters = match parameters_of(&headers, state.token.is_some()) {
         Ok(parameters) => parameters,
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, &Value::Null, error),
     };
+    if !parameters.iter().all(|(name, _)| name.starts_with("a2a-")) {
+        return match asked_card(&state, parameters).await {
+            Ok(card) => json_response(StatusCode::OK, &card),
+            Err(refused) => *refused,
+        };
+    }
+    let mut cached = state.card.lock().await;
+    let Some(link) = state.hub.link() else {
+        return down(&Value::Null);
+    };
+    if let Some(kept) = cached.as_ref().filter(|kept| {
+        kept.link == link
+            && kept.parameters == parameters
+            && kept.taken.elapsed() < state.card_cache
+    }) {
+        return json_response(StatusCode::OK, &kept.card);
+    }
+    match asked_card(&state, parameters.clone()).await {
+        Ok(card) => {
+            let response = json_response(StatusCode::OK, &card);
+            *cached = Some(CachedCard {
+                link,
+                parameters,
+                taken: Instant::now(),
+                card,
+            });
+            response
+        }
+        Err(refused) => *refused,
+    }
+}
+
+/// Asks the agent for its card. `Err` is the HTTP answer to a failure.
+async fn asked_card(
+    state: &Shared,
+    parameters: ServiceParameters,
+) -> Result<Value, Box<HttpResponse>> {
     let (reply, answer) = oneshot::channel();
     let job = state.job(
         Method::GetAgentCard,
@@ -1173,18 +1272,16 @@ async fn card(State(state): State<Shared>, headers: HeaderMap) -> HttpResponse {
         Reply::One(reply),
     );
     if !state.hub.submit(job) {
-        return down(&Value::Null);
+        return Err(Box::new(down(&Value::Null)));
     }
     let Ok(answer) = answer.await else {
-        return down(&Value::Null);
+        return Err(Box::new(down(&Value::Null)));
     };
     if answer.is_error {
-        return answered(StatusCode::BAD_GATEWAY, answer);
+        return Err(Box::new(answered(StatusCode::BAD_GATEWAY, answer)));
     }
-    match rewritten(&answer.text, state.address) {
-        Ok(card) => json_response(StatusCode::OK, &card),
-        Err(error) => rpc_error(StatusCode::BAD_GATEWAY, &Value::Null, error),
-    }
+    rewritten(&answer.text, state.address)
+        .map_err(|error| Box::new(rpc_error(StatusCode::BAD_GATEWAY, &Value::Null, error)))
 }
 
 /// A card as this endpoint serves it, from the JSON the agent sent.
@@ -1347,5 +1444,122 @@ mod tests {
         };
         assert!(answer.is_error);
         assert!(answer.text.contains("-32006"), "{}", answer.text);
+    }
+
+    /// A peer that answers every request with a card naming it, until told the link is over.
+    struct CardPeer {
+        name: &'static str,
+        outgoing: Mutex<std::collections::VecDeque<Vec<u8>>>,
+        over: AtomicBool,
+        asked: AtomicUsize,
+    }
+
+    impl CardPeer {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                outgoing: Mutex::default(),
+                over: AtomicBool::new(false),
+                asked: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Channel for CardPeer {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            if let Some(Frame::Data { stream, .. }) = Frame::decode(message) {
+                self.asked.fetch_add(1, Ordering::SeqCst);
+                let answer = json!({ "jsonrpc": "2.0", "id": 1, "result": { "name": self.name } });
+                let mut outgoing = self.outgoing.lock().unwrap();
+                outgoing.push_back(
+                    Frame::Data {
+                        stream,
+                        body: answer.to_string().into_bytes(),
+                    }
+                    .encode(),
+                );
+                outgoing.push_back(Frame::Finish { stream }.encode());
+            }
+            Ok(())
+        }
+
+        fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            if let Some(frame) = self.outgoing.lock().unwrap().pop_front() {
+                return Ok(Some(frame));
+            }
+            if self.over.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            thread::sleep(Duration::from_millis(1));
+            Err(Failure::Timeout)
+        }
+
+        fn close(&self) {}
+    }
+
+    fn card_name(address: SocketAddr) -> Option<String> {
+        use std::io::{Read as _, Write as _};
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(
+            stream,
+            "GET /.well-known/agent-card.json HTTP/1.0\r\nHost: {address}\r\n\r\n"
+        )
+        .unwrap();
+        let mut text = String::new();
+        stream.read_to_string(&mut text).unwrap();
+        let (_, body) = text.split_once("\r\n\r\n")?;
+        serde_json::from_str::<Value>(body).ok()?["name"]
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    fn attached(hub: &Hub, link: u64) {
+        while hub.link() != Some(link) {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_card_lasts_as_long_as_its_link_and_a_links_end_is_only_its_own() {
+        let hub = Hub::new();
+        let config = Config::new("127.0.0.1:0".parse().unwrap()).unwrap();
+        let endpoint = Loopback::start(config, Arc::clone(&hub)).unwrap();
+        let address = endpoint.local_addr();
+        let (first, second, third) = (
+            CardPeer::new("first"),
+            CardPeer::new("second"),
+            CardPeer::new("third"),
+        );
+        let limits = Limits::default();
+        thread::scope(|scope| {
+            scope.spawn(|| Mux::run(&first, Side::Dialed, limits, None, |mux| hub.attach(mux)));
+            attached(&hub, 0);
+            for _ in 0..5 {
+                assert_eq!(card_name(address).as_deref(), Some("first"));
+            }
+            assert_eq!(first.asked.load(Ordering::SeqCst), 1);
+
+            // A link that takes over serves its own card, and outlives the end of the one before.
+            scope.spawn(|| Mux::run(&second, Side::Dialed, limits, None, |mux| hub.attach(mux)));
+            attached(&hub, 1);
+            assert_eq!(card_name(address).as_deref(), Some("second"));
+            first.over.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(300));
+            assert!(hub.is_up(), "the end of the first link detached the second");
+            assert_eq!(card_name(address).as_deref(), Some("second"));
+            assert_eq!(second.asked.load(Ordering::SeqCst), 1);
+
+            // With no link there is no card, however recently one was read.
+            second.over.store(true, Ordering::SeqCst);
+            while hub.is_up() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(card_name(address), None);
+
+            scope.spawn(|| Mux::run(&third, Side::Dialed, limits, None, |mux| hub.attach(mux)));
+            attached(&hub, 2);
+            assert_eq!(card_name(address).as_deref(), Some("third"));
+            third.over.store(true, Ordering::SeqCst);
+        });
     }
 }

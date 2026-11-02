@@ -833,3 +833,121 @@ fn an_agent_that_says_nothing_in_time_is_an_error_and_its_stream_is_let_go() {
         },
     );
 }
+
+fn get_card(address: SocketAddr, extra: &str) -> Reply {
+    http(
+        address,
+        &format!("GET /.well-known/agent-card.json HTTP/1.0\r\nHost: {address}\r\n{extra}\r\n"),
+        b"",
+    )
+}
+
+#[test]
+fn what_a_browser_sends_for_a_page_reaches_nothing() {
+    with_echo(
+        |config| config,
+        |endpoint| {
+            let address = endpoint.address;
+            let body = rpc("1", "GetTask", &json!({ "id": "x" }));
+            for page in [
+                "Sec-Fetch-Site: cross-site\r\n",
+                "Sec-Fetch-Site: same-site\r\n",
+                "Sec-Fetch-Site: none\r\n",
+                "Sec-Fetch-Mode: no-cors\r\n",
+                "Sec-Fetch-Mode: navigate\r\n",
+                "Sec-Fetch-Dest: image\r\n",
+                "Sec-Fetch-Dest: empty\r\n",
+                "Sec-Fetch-User: ?1\r\n",
+                "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: script\r\n",
+                "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n",
+            ] {
+                assert_eq!(get_card(address, page).status, 403, "{page}");
+                assert_eq!(post(address, page, &body).status, 403, "{page}");
+            }
+            assert_eq!(
+                endpoint.agent.cards.load(Ordering::SeqCst),
+                0,
+                "none of it reached the link"
+            );
+            // What Node's fetch sends, with no page behind it, is not refused.
+            assert_eq!(get_card(address, "Sec-Fetch-Mode: cors\r\n").status, 200);
+            assert_eq!(post(address, "Sec-Fetch-Mode: cors\r\n", &body).status, 200);
+        },
+    );
+}
+
+#[test]
+fn a_listed_origin_is_not_taken_for_a_stray_page() {
+    with_endpoint(
+        |config| config.allow_origin("http://127.0.0.1:3000"),
+        |address| {
+            let from_page =
+                "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n";
+            let listed = format!("Origin: http://127.0.0.1:3000\r\n{from_page}");
+            assert_eq!(get_card(address, &listed).status, 200);
+            let unlisted = format!("Origin: http://127.0.0.1:3001\r\n{from_page}");
+            assert_eq!(get_card(address, &unlisted).status, 403);
+            // The same page's no-cors GET carries no Origin to be listed.
+            assert_eq!(get_card(address, from_page).status, 403);
+        },
+    );
+}
+
+#[test]
+fn reading_the_card_does_not_spend_the_links_opens() {
+    with_echo(
+        |config| config,
+        |endpoint| {
+            let address = endpoint.address;
+            // More than the 600 opens a minute a link allows.
+            for _ in 0..700 {
+                assert_eq!(get_card(address, "").status, 200);
+            }
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 1);
+
+            // Many at once wait for one answer rather than asking too.
+            thread::scope(|scope| {
+                for _ in 0..16 {
+                    scope.spawn(|| {
+                        assert_eq!(get_card(address, "A2A-Version: 1.0\r\n").status, 200)
+                    });
+                }
+            });
+            assert_eq!(
+                endpoint.agent.cards.load(Ordering::SeqCst),
+                2,
+                "other parameters ask once more"
+            );
+
+            // A credential may change what is shown, so it never takes or leaves a kept card.
+            for _ in 0..2 {
+                let card = get_card(address, "Authorization: Bearer agent-token\r\n");
+                assert_eq!(card.status, 200);
+            }
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 4);
+        },
+    );
+}
+
+#[test]
+fn a_kept_card_goes_when_it_is_old() {
+    with_echo(
+        |config| config.with_card_cache(Duration::from_millis(100)),
+        |endpoint| {
+            assert_eq!(get_card(endpoint.address, "").status, 200);
+            assert_eq!(get_card(endpoint.address, "").status, 200);
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 1);
+            thread::sleep(Duration::from_millis(150));
+            assert_eq!(get_card(endpoint.address, "").status, 200);
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 2);
+        },
+    );
+    with_echo(
+        |config| config.with_card_cache(Duration::ZERO),
+        |endpoint| {
+            assert_eq!(get_card(endpoint.address, "").status, 200);
+            assert_eq!(get_card(endpoint.address, "").status, 200);
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 2);
+        },
+    );
+}
