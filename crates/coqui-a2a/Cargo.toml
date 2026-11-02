@@ -1,0 +1,31 @@
+[package]
+name = "coqui-a2a"
+description = "A2A over a proven coqui-agentic-peer link, as a custom protocol binding, with a loopback HTTP command for unmodified A2A software"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["a2a", "agent", "peer", "protocol-binding"]
+categories = ["network-programming"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Timestamps in the form the specification fixes: ISO 8601 in UTC.
+time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
