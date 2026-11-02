@@ -15,13 +15,18 @@ exclude = [".*", "*.local.*"]
 publish = false
 
 [dependencies]
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "24dc05d9cc478feebff770f3e7852c32f76748c5" }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Timestamps in the form the specification fixes: ISO 8601 in UTC.
 time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
 
 [dev-dependencies]
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", features = ["pin"] }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6", features = ["websocket"] }
 proptest = "1"
+url = "2.5"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -1,12 +1,18 @@
-//! The A2A data model, its error table and the messages of the coqui-agentic-peer binding.
+//! A2A over a proven `coqui-agentic-peer` link: client and server of the binding.
 #![forbid(unsafe_code)]
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
+pub mod agent;
+pub mod client;
 pub mod error;
 pub mod model;
+pub mod server;
 pub mod wire;
 
+pub use agent::{Agent, Caller, Events, Watch};
+pub use client::{Client, ClientError, ClientTimeouts};
 pub use error::{A2aError, ErrorKind};
+pub use server::{Server, ServerLimits};
 
 /// The token of the stream protocol, and the grant a peer needs.
 pub const PROTOCOL: &str = "a2a/1";
