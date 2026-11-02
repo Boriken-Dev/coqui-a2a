@@ -35,8 +35,10 @@ impl Reply {
 fn http(address: SocketAddr, head: &str, body: &[u8]) -> Reply {
     let mut stream = TcpStream::connect(address).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
-    stream.write_all(head.as_bytes()).unwrap();
-    stream.write_all(body).unwrap();
+    // In one write: a body arriving after a refusal has closed the connection resets it, which loses the refusal.
+    let mut request = head.as_bytes().to_vec();
+    request.extend_from_slice(body);
+    stream.write_all(&request).unwrap();
     let mut bytes = Vec::new();
     let _ = stream.read_to_end(&mut bytes);
     let text = String::from_utf8_lossy(&bytes).into_owned();
