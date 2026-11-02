@@ -153,8 +153,9 @@ impl<'m, 'c, C: Channel> Client<'m, 'c, C> {
             Err(Failure::Protocol) => return Err(ClientError::TooLarge),
             Err(failure) => return Err(why(&stream, failure)),
         }
-        // Half-close: the request is complete, and the answer comes back on this stream.
-        stream.finish().map_err(|failure| why(&stream, failure))?;
+        // Half-close: the request is complete, and the answer comes back on this stream. It fails when
+        // the stream has already ended, answered or not, which the read that follows says better.
+        let _ = stream.finish();
         Ok((stream, id))
     }
 
@@ -369,7 +370,8 @@ impl<C: Channel> Iterator for RawEvents<'_, C> {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 self.done = true;
-                return None;
+                // An orderly close says nothing of the answer being whole: only the peer's finish does.
+                return (!self.stream.finished_by_peer()).then_some(Err(ClientError::Interrupted));
             }
             Err(failure) => {
                 self.done = true;
