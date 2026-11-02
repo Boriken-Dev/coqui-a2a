@@ -4,9 +4,9 @@
 //   A2A_JS_SDK_DIR=/path/with/node_modules node scripts/sdk-check.mjs
 //
 // The SDK is @a2a-js/sdk (npm). Without it, or without the two programs, this prints why it
-// skipped and exits 0: it is an optional check. Everything the SDK sends is printed.
+// skipped and exits 0: it is an optional check. Everything the SDK sends is printed, its token hidden.
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,11 +25,11 @@ const echoBin = process.env.COQUI_A2A_ECHO;
 if (!loopbackBin || !existsSync(loopbackBin)) skip("COQUI_A2A_BIN does not name the coqui-a2a binary");
 if (!echoBin || !existsSync(echoBin)) skip("COQUI_A2A_ECHO does not name the echo_server example");
 
-const { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } = await import(
+const { ClientFactory, ClientFactoryOptions, DefaultAgentCardResolver, JsonRpcTransportFactory } = await import(
   pathToFileURL(sdkEntry)
 );
 const sdkVersion = JSON.parse(
-  (await import("node:fs")).readFileSync(join(sdkDir, "node_modules", "@a2a-js", "sdk", "package.json"), "utf8"),
+  readFileSync(join(sdkDir, "node_modules", "@a2a-js", "sdk", "package.json"), "utf8"),
 ).version;
 console.log(`@a2a-js/sdk ${sdkVersion}`);
 
@@ -69,24 +69,27 @@ const serverId = await serverLine();
 const loopback = spawn(
   loopbackBin,
   ["loopback", "--url", `ws://127.0.0.1:${port}/link`, "--identity", join(dir, "client.pem"), "--peer", serverId],
-  { stdio: ["ignore", "pipe", "inherit"] },
+  { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, COQUI_AGENTIC_PEER_HOME: dir } },
 );
 children.push(loopback);
-const base = (await lines(loopback)()).trim();
+const loopbackLine = lines(loopback);
+const base = (await loopbackLine()).trim();
 console.log(`loopback endpoint ${base}`);
+// The command makes a token of its own, and says where it keeps it.
+const authorization = `Bearer ${readFileSync((await loopbackLine()).trim(), "utf8").trim()}`;
 
-// What the SDK sends, as seen from outside.
+// What the SDK sends, as seen from outside. Its token goes in here, as a client's own fetch would do it.
 const sent = [];
 const loggingFetch = async (input, init) => {
   const url = typeof input === "string" ? input : input.url;
   const headers = Object.fromEntries(new Headers(init?.headers ?? {}));
   sent.push({ method: init?.method ?? "GET", url, headers, body: init?.body });
-  return fetch(input, init);
+  return fetch(input, { ...init, headers: { ...headers, authorization } });
 };
 
 // The endpoint listens before the link is up and answers 503 until it is, so wait for the card.
 for (let tries = 0; ; tries += 1) {
-  const probe = await fetch(`${base}.well-known/agent-card.json`).catch(() => undefined);
+  const probe = await fetch(`${base}.well-known/agent-card.json`, { headers: { authorization } }).catch(() => undefined);
   if (probe?.status === 200) break;
   if (tries > 100) throw new Error(`the endpoint never became ready (last status ${probe?.status})`);
   await new Promise((done) => setTimeout(done, 100));
@@ -95,7 +98,7 @@ for (let tries = 0; ; tries += 1) {
 const factory = new ClientFactory(
   ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
     transports: [new JsonRpcTransportFactory({ fetchImpl: loggingFetch })],
-    cardResolver: undefined,
+    cardResolver: new DefaultAgentCardResolver({ fetchImpl: loggingFetch }),
   }),
 );
 let failed = 0;
@@ -105,6 +108,9 @@ const check = (name, ok, detail = "") => {
 };
 
 try {
+  const unauthorized = await fetch(`${base}.well-known/agent-card.json`);
+  check("a client with no token is refused", unauthorized.status === 401, String(unauthorized.status));
+
   const client = await factory.createFromUrl(base);
   const card = await client.getAgentCard();
   check("the card was read and names the loopback endpoint", card.name === "Echo", JSON.stringify(card.supportedInterfaces));
