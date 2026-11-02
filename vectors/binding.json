@@ -1,0 +1,67 @@
+{
+  "about": "Messages of the coqui-agentic-peer A2A binding. Each request case is one stream message: an implementation decodes `input` as a request and must arrive at `outcome`.",
+  "requests": [
+    {
+      "name": "a send with a version",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"SendMessage\",\"params\":{\"message\":{\"messageId\":\"m1\",\"role\":\"ROLE_USER\",\"parts\":[{\"text\":\"hi\"}]}},\"a2a-service-parameters\":{\"A2A-Version\":\"1.0\"}}",
+      "outcome": { "id": 1, "method": "SendMessage", "service_parameters": { "a2a-version": "1.0" } }
+    },
+    {
+      "name": "a string id and no params",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"GetExtendedAgentCard\"}",
+      "outcome": { "id": "abc", "method": "GetExtendedAgentCard", "service_parameters": {} }
+    },
+    {
+      "name": "members it does not know are ignored",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"GetAgentCard\",\"later\":true}",
+      "outcome": { "id": 2, "method": "GetAgentCard", "service_parameters": {} }
+    },
+    {
+      "name": "not JSON",
+      "input": "{nope",
+      "outcome": { "error": -32700, "id": null }
+    },
+    {
+      "name": "a batch",
+      "input": "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"GetTask\"}]",
+      "outcome": { "error": -32600, "id": null }
+    },
+    {
+      "name": "no jsonrpc member",
+      "input": "{\"id\":3,\"method\":\"GetTask\"}",
+      "outcome": { "error": -32600, "id": 3 }
+    },
+    {
+      "name": "an id that is an object",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"GetTask\"}",
+      "outcome": { "error": -32600, "id": null }
+    },
+    {
+      "name": "params that are an array",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"GetTask\",\"params\":[]}",
+      "outcome": { "error": -32600, "id": 4 }
+    },
+    {
+      "name": "a service parameter that is not a string",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"GetTask\",\"a2a-service-parameters\":{\"a2a-version\":1}}",
+      "outcome": { "error": -32600, "id": 5 }
+    },
+    {
+      "name": "a service parameter name with a space",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"GetTask\",\"a2a-service-parameters\":{\"a b\":\"x\"}}",
+      "outcome": { "error": -32600, "id": 6 }
+    }
+  ],
+  "errors": [
+    {
+      "name": "task not found",
+      "response": "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32001,\"message\":\"Task not found\",\"data\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"TASK_NOT_FOUND\",\"domain\":\"a2a-protocol.org\",\"metadata\":{\"taskId\":\"t1\"}}]}}",
+      "kind": "TaskNotFoundError"
+    },
+    {
+      "name": "an error from a newer peer keeps its code",
+      "response": "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32099,\"message\":\"later\"}}",
+      "kind": null
+    }
+  ]
+}
