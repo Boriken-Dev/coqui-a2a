@@ -2,7 +2,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coqui_agentic_peer::link::{Accepted, Handler, Services};
 use coqui_agentic_peer::mux::{CloseReason, LinkStream, StreamLife};
@@ -27,6 +27,9 @@ pub struct ServerLimits {
     pub max_request: usize,
     /// How long a stream may stay open before it sends its request.
     pub request_timeout: Duration,
+    /// How long a client may leave its window full. Past this the stream is closed as `broken`, so
+    /// the client reads it as cut short, and the agent is released.
+    pub reader_stall: Duration,
 }
 
 impl Default for ServerLimits {
@@ -34,6 +37,7 @@ impl Default for ServerLimits {
         Self {
             max_request: 1 << 20,
             request_timeout: Duration::from_secs(10),
+            reader_stall: Duration::from_secs(30),
         }
     }
 }
@@ -99,11 +103,14 @@ impl Server {
             return;
         };
         let id = request.id.clone();
-        let outcome = self.run(stream, accepted, request);
-        if let Err(error) = outcome {
-            let _ = send(stream, &Response::error(id, error));
+        let sent = match self.run(stream, accepted, request) {
+            Ok(sent) => sent,
+            Err(error) => self.send(stream, &Response::error(id, error)),
+        };
+        // `finish` tells the client the answer is whole, so nothing else may lead to it.
+        if sent == Sent::Yes {
+            let _ = stream.finish();
         }
-        let _ = stream.finish();
     }
 
     fn read_request(&self, stream: &dyn LinkStream) -> Option<Request> {
@@ -112,8 +119,9 @@ impl Server {
             Ok(None) | Err(_) => return None,
         };
         let refuse = |id: Value, error: A2aError| {
-            let _ = send(stream, &Response::error(id, error));
-            let _ = stream.finish();
+            if self.send(stream, &Response::error(id, error)) == Sent::Yes {
+                let _ = stream.finish();
+            }
         };
         if bytes.len() > self.limits.max_request {
             refuse(
@@ -131,13 +139,14 @@ impl Server {
         }
     }
 
-    /// Runs a request. `Err` is sent as the stream's one response; success has sent its own.
+    /// Runs a request. `Err` is sent as the stream's one response; `Ok` has sent its own, and says
+    /// how that went.
     fn run(
         &self,
         stream: &dyn LinkStream,
         accepted: &Accepted,
         request: Request,
-    ) -> Result<(), A2aError> {
+    ) -> Result<Sent, A2aError> {
         let Request {
             id,
             method,
@@ -182,37 +191,37 @@ impl Server {
         }
         let agent = &*self.agent;
         match method {
-            Method::GetAgentCard => unary(stream, id, Ok(self.link_card(card))),
+            Method::GetAgentCard => self.unary(stream, id, Ok(self.link_card(card))),
             Method::SendMessage => {
                 let request = send_request(params)?;
-                unary(stream, id, guarded(|| agent.send_message(&caller, request)))
+                self.unary(stream, id, guarded(|| agent.send_message(&caller, request)))
             }
             Method::SendStreamingMessage => {
                 let request = send_request(params)?;
                 let events = guarded(|| agent.send_streaming_message(&caller, request))?;
-                pump(stream, &id, events, &watch)
+                self.pump(stream, &id, events, &watch)
             }
             Method::GetTask => {
                 let request: GetTaskRequest = params_as(params)?;
-                unary(stream, id, guarded(|| agent.get_task(&caller, request)))
+                self.unary(stream, id, guarded(|| agent.get_task(&caller, request)))
             }
             Method::ListTasks => {
                 let request: ListTasksRequest = params_as(params)?;
-                unary(stream, id, guarded(|| agent.list_tasks(&caller, request)))
+                self.unary(stream, id, guarded(|| agent.list_tasks(&caller, request)))
             }
             Method::CancelTask => {
                 let request: CancelTaskRequest = params_as(params)?;
-                unary(stream, id, guarded(|| agent.cancel_task(&caller, request)))
+                self.unary(stream, id, guarded(|| agent.cancel_task(&caller, request)))
             }
             Method::SubscribeToTask => {
                 let request: SubscribeToTaskRequest = params_as(params)?;
                 let events = guarded(|| agent.subscribe_to_task(&caller, request))?;
-                pump(stream, &id, events, &watch)
+                self.pump(stream, &id, events, &watch)
             }
             Method::GetExtendedAgentCard => {
                 let request: GetExtendedAgentCardRequest = params_as(params)?;
                 let card = guarded(|| agent.get_extended_agent_card(&caller, request))?;
-                unary(stream, id, Ok(self.link_card(card)))
+                self.unary(stream, id, Ok(self.link_card(card)))
             }
             // Handled above: the push operations never reach an agent.
             _ => Err(A2aError::standard(ErrorKind::MethodNotFound)),
@@ -235,6 +244,109 @@ impl Server {
             },
         );
         card
+    }
+
+    /// Sends one response, or returns the error to be the stream's answer instead.
+    fn unary<T: Serialize>(
+        &self,
+        stream: &dyn LinkStream,
+        id: Value,
+        outcome: Result<T, A2aError>,
+    ) -> Result<Sent, A2aError> {
+        let result = to_result(&outcome?)?;
+        match self.send(stream, &Response::result(id, result)) {
+            Sent::TooLarge => Err(too_large()),
+            sent => Ok(sent),
+        }
+    }
+
+    /// Sends a stream of items in order, and stops after the one that ends the task. The agent's
+    /// iterator runs on a thread of its own, so a quiet one cannot hide a client that left.
+    fn pump(
+        &self,
+        stream: &dyn LinkStream,
+        id: &Value,
+        events: Events,
+        watch: &Watch,
+    ) -> Result<Sent, A2aError> {
+        let (items, received) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let mut events = events;
+                loop {
+                    let item = match guarded_value(|| events.next()) {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break,
+                        Err(error) => Err(error),
+                    };
+                    let failed = item.is_err();
+                    if items.send(item).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+            // Moved in, so it goes before the scope joins: that is what frees a thread blocked on a
+            // full channel. The watch closing is what frees one waiting on the agent's own events.
+            let received = received;
+            let _closes = CloseOnDrop(watch.clone());
+            let mut first = true;
+            loop {
+                let item = match received.recv_timeout(QUIET_POLL) {
+                    Ok(item) => item?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if !stream_open(stream) {
+                            return Ok(Sent::Gone);
+                        }
+                        match excess(stream) {
+                            Some(extra) => return Err(extra),
+                            None => continue,
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Sent::Yes),
+                };
+                // A message-only stream holds exactly one message; a task stream closes at a terminal state.
+                let last =
+                    item.ends_task() || (first && matches!(item, StreamResponse::Message(_)));
+                match self.send(stream, &Response::result(id.clone(), to_result(&item)?)) {
+                    Sent::Yes => {}
+                    Sent::TooLarge => return Err(too_large()),
+                    ended => return Ok(ended),
+                }
+                if last {
+                    return Ok(Sent::Yes);
+                }
+                if !stream_open(stream) {
+                    return Ok(Sent::Gone);
+                }
+                first = false;
+                if let Some(extra) = excess(stream) {
+                    return Err(extra);
+                }
+            }
+        })
+    }
+
+    /// Sends one response, waiting for a slow reader's credit. A reader that gives none within
+    /// [`ServerLimits::reader_stall`] loses the stream as `broken`.
+    fn send(&self, stream: &dyn LinkStream, response: &Response) -> Sent {
+        let bytes = response.encode();
+        let until = Instant::now() + self.limits.reader_stall;
+        loop {
+            match stream.send(&bytes) {
+                Ok(()) => return Sent::Yes,
+                // Full, either this stream's window or the link. Nothing was sent, so it can be sent again.
+                Err(Failure::NoProgress) if Instant::now() < until => {
+                    std::thread::sleep(FULL_POLL);
+                }
+                Err(Failure::NoProgress) => {
+                    stream.close_with(CloseReason::Broken, "the client stopped reading");
+                    return Sent::Stalled;
+                }
+                // The same failure for a message past the bound and for a stream already over.
+                Err(Failure::Protocol) if stream_open(stream) => return Sent::TooLarge,
+                Err(_) => return Sent::Gone,
+            }
+        }
     }
 }
 
@@ -326,19 +438,6 @@ fn to_result<T: Serialize>(value: &T) -> Result<Value, A2aError> {
     })
 }
 
-/// Sends one response, or returns the error to be the stream's answer instead.
-fn unary<T: Serialize>(
-    stream: &dyn LinkStream,
-    id: Value,
-    outcome: Result<T, A2aError>,
-) -> Result<(), A2aError> {
-    let result = to_result(&outcome?)?;
-    match send(stream, &Response::result(id, result)) {
-        Sent::TooLarge => Err(too_large()),
-        Sent::Yes | Sent::Gone => Ok(()),
-    }
-}
-
 /// Closes a [`Watch`] when the operation is over, however it ends.
 struct CloseOnDrop(Watch);
 
@@ -350,64 +449,8 @@ impl Drop for CloseOnDrop {
 
 /// How often a quiet stream looks for a client that left or spoke twice.
 const QUIET_POLL: Duration = Duration::from_millis(100);
-
-/// Sends a stream of items in order, and stops after the one that ends the task. The agent's
-/// iterator runs on a thread of its own, so a quiet one cannot hide a client that left.
-fn pump(
-    stream: &dyn LinkStream,
-    id: &Value,
-    events: Events,
-    watch: &Watch,
-) -> Result<(), A2aError> {
-    let (items, received) = std::sync::mpsc::sync_channel(1);
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let mut events = events;
-            loop {
-                let item = match guarded_value(|| events.next()) {
-                    Ok(Some(item)) => item,
-                    Ok(None) => break,
-                    Err(error) => Err(error),
-                };
-                let failed = item.is_err();
-                if items.send(item).is_err() || failed {
-                    break;
-                }
-            }
-        });
-        let _closes = CloseOnDrop(watch.clone());
-        let mut first = true;
-        loop {
-            let item = match received.recv_timeout(QUIET_POLL) {
-                Ok(item) => item?,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if !stream_open(stream) {
-                        return Ok(());
-                    }
-                    match excess(stream) {
-                        Some(extra) => return Err(extra),
-                        None => continue,
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-            };
-            // A message-only stream holds exactly one message; a task stream closes at a terminal state.
-            let last = item.ends_task() || (first && matches!(item, StreamResponse::Message(_)));
-            match send(stream, &Response::result(id.clone(), to_result(&item)?)) {
-                Sent::Yes => {}
-                Sent::TooLarge => return Err(too_large()),
-                Sent::Gone => return Ok(()),
-            }
-            if last || !stream_open(stream) {
-                return Ok(());
-            }
-            first = false;
-            if let Some(extra) = excess(stream) {
-                return Err(extra);
-            }
-        }
-    })
-}
+/// How often a send tries a link that is full, which answers at once and not after a wait.
+const FULL_POLL: Duration = Duration::from_millis(5);
 
 fn too_large() -> A2aError {
     A2aError::new(
@@ -420,16 +463,13 @@ fn stream_open(stream: &dyn LinkStream) -> bool {
     stream.life() == StreamLife::Open
 }
 
+/// How a response went.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Sent {
     Yes,
     TooLarge,
+    /// The stream ended some other way.
     Gone,
-}
-
-fn send(stream: &dyn LinkStream, response: &Response) -> Sent {
-    match stream.send(&response.encode()) {
-        Ok(()) => Sent::Yes,
-        Err(Failure::Protocol) => Sent::TooLarge,
-        Err(_) => Sent::Gone,
-    }
+    /// The reader stopped, and this side closed the stream as `broken`.
+    Stalled,
 }

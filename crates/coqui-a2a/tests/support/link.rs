@@ -3,10 +3,10 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coqui_agentic_peer::auth::{self, Sealed, prove_out};
 use coqui_agentic_peer::link::{self, Host as LinkHost, Options, Services};
@@ -19,6 +19,34 @@ use coqui_web::{Channel as _, Dialer as _, Kind};
 pub const WAIT: Duration = Duration::from_secs(10);
 /// The channel limit once a peer is proven.
 pub const MAX_LINE: usize = 16 * 1024 * 1024;
+
+/// Ends the whole test program when it is still alive after `limit`, naming what hung: the thing
+/// a test holds it for is a deadlock, which would otherwise stop the run rather than fail it.
+pub struct Watchdog(Arc<AtomicBool>);
+
+impl Watchdog {
+    pub fn start(limit: Duration, what: &'static str) -> Self {
+        let disarmed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&disarmed);
+        let until = Instant::now() + limit;
+        thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                if Instant::now() > until {
+                    eprintln!("hung: {what}");
+                    std::process::exit(101);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Self(disarmed)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 
 /// What a server end of a link is built from.
 pub struct Setup {

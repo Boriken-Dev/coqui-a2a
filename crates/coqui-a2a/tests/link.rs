@@ -14,7 +14,7 @@ use coqui_a2a::model::{
     SubscribeToTaskRequest, TaskState,
 };
 use coqui_a2a::wire::Method;
-use coqui_a2a::{BINDING, Client, ClientError, PROTOCOL, Server};
+use coqui_a2a::{BINDING, Client, ClientError, PROTOCOL, Server, ServerLimits};
 use coqui_agentic_peer::link::{Services, capabilities};
 use coqui_agentic_peer::mux::{LinkStream, StreamEnd};
 use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
@@ -22,7 +22,7 @@ use coqui_peer_webcrypto::{Identity, Trust};
 use coqui_web::Channel as _;
 use serde_json::{Value, json};
 use support::agent::{Echo, user};
-use support::link::{Host, Setup, WAIT, over_link};
+use support::link::{Host, Setup, WAIT, Watchdog, over_link};
 
 const ECHO: &str = "echo/1";
 
@@ -69,6 +69,32 @@ fn world(grants: &[&str]) -> World {
         client,
         store,
         agent,
+    }
+}
+
+/// A host serving `services`, with its one client granted `a2a/1`.
+fn hosting(services: Services) -> (Host, Identity) {
+    let client = Identity::generate().unwrap();
+    let store = Arc::new(MemoryPeers::default());
+    store
+        .put(&PeerRecord::new(&client.peer_id().to_string()).granting(PROTOCOL))
+        .unwrap();
+    let host = Host::start(Setup::new(
+        Identity::generate().unwrap(),
+        Trust::pinned([client.peer_id()]),
+        store,
+        services,
+    ));
+    (host, client)
+}
+
+/// Waits for `count` iterators of `agent` to have been dropped, which frees the operations they
+/// belonged to.
+fn released(agent: &Echo, count: usize, what: &str) {
+    let started = Instant::now();
+    while agent.ended.load(Ordering::SeqCst) < count {
+        assert!(started.elapsed() < WAIT, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -553,6 +579,154 @@ fn a_message_past_the_links_own_bound_breaks_that_stream_and_keeps_the_link() {
         assert!(
             client.send_message(&user("small")).is_ok(),
             "the link and the next stream are fine"
+        );
+    });
+}
+
+#[test]
+fn an_agent_still_producing_is_released_however_the_operation_ends() {
+    let _hang = Watchdog::start(
+        Duration::from_secs(60),
+        "an operation never let its agent go",
+    );
+    let world = world(&[PROTOCOL]);
+    over_link(&world.host, world.client.clone(), |mux| {
+        // The client leaves while the agent has more ready than the channel holds.
+        let client = Client::new(mux);
+        let mut events = client.send_streaming_message(&user("flood:64")).unwrap();
+        assert!(events.next().unwrap().is_ok());
+        drop(events);
+        released(
+            &world.agent,
+            1,
+            "the client left and the agent kept producing",
+        );
+
+        // A second message on the stream ends it the same way.
+        let stream = mux.open(PROTOCOL).unwrap();
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "SendStreamingMessage",
+            "params": { "message": { "messageId": "m", "role": "ROLE_USER", "parts": [{ "text": "flood:64" }] } },
+        })
+        .to_string();
+        stream.send(request.as_bytes()).unwrap();
+        assert!(stream.receive(Some(WAIT)).unwrap().is_some());
+        stream.send(request.as_bytes()).unwrap();
+        released(&world.agent, 2, "a refused stream kept its agent producing");
+
+        let next = client.send_message(&user("next"));
+        assert!(next.is_ok(), "{next:?}");
+    });
+}
+
+/// The window is 1 MiB and a send waits 250 ms for credit by default, so a client that reads nothing
+/// for longer than that, with more than the window on its way, is what this needs.
+const CHUNK: usize = 256 * 1024;
+
+#[test]
+fn a_slow_reader_gets_all_of_it_and_the_end_says_so() {
+    let world = world(&[PROTOCOL]);
+    over_link(&world.host, world.client.clone(), |mux| {
+        let client = Client::new(mux);
+        let mut events = client
+            .send_streaming_message(&user(&format!("big:12:{CHUNK}")))
+            .unwrap();
+        let first = events.next().unwrap().unwrap();
+        assert!(matches!(first, StreamResponse::Task(_)));
+        std::thread::sleep(Duration::from_millis(1200));
+        let rest: Vec<StreamResponse> = events.collect::<Result<_, _>>().unwrap();
+        assert_eq!(rest.len(), 13, "twelve chunks and the task's end");
+        assert!(rest.last().unwrap().ends_task());
+    });
+}
+
+#[test]
+fn a_reader_that_stops_loses_the_stream_and_is_told_it_is_cut_short() {
+    let agent = Echo::default();
+    let mut limits = ServerLimits::default();
+    limits.reader_stall = Duration::from_millis(300);
+    let services = Server::new(agent.clone())
+        .with_limits(limits)
+        .serving(Services::default());
+    let (host, client) = hosting(services);
+    over_link(&host, client, |mux| {
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "SendStreamingMessage",
+            "params": { "message": { "messageId": "m", "role": "ROLE_USER", "parts": [{ "text": format!("big:40:{CHUNK}") }] } },
+        })
+        .to_string();
+        let stream = mux.open(PROTOCOL).unwrap();
+        stream.send(request.as_bytes()).unwrap();
+        stream.finish().unwrap();
+        assert!(stream.receive(Some(WAIT)).unwrap().is_some());
+        released(
+            &agent,
+            1,
+            "the agent was not released when the reader stopped",
+        );
+
+        // What was already on its way can be read, and then the end is no finish.
+        let mut read = 1;
+        let end = loop {
+            match stream.receive(Some(WAIT)) {
+                Ok(Some(_)) => read += 1,
+                other => break other,
+            }
+        };
+        assert!(
+            read < 41,
+            "the whole task did not get through a stopped reader"
+        );
+        assert!(end.is_err(), "{end:?}");
+        assert_eq!(stream.end(), Some(StreamEnd::Broken));
+        assert!(!stream.finished_by_peer());
+    });
+}
+
+#[test]
+fn a_stream_closed_in_order_with_no_finish_is_not_a_whole_answer() {
+    // A peer that says two things, and goes without `finish`: what a crash or a bad server does.
+    let services = Services::default().with(
+        PROTOCOL,
+        Box::new(|stream: &dyn LinkStream, _| {
+            let request: Value =
+                serde_json::from_slice(&stream.receive(Some(WAIT)).unwrap().unwrap()).unwrap();
+            for _ in 0..2 {
+                let item = json!({ "jsonrpc": "2.0", "id": request["id"], "result": { "statusUpdate": { "taskId": "t", "contextId": "c", "status": { "state": "TASK_STATE_WORKING" } } } });
+                stream.send(item.to_string().as_bytes()).unwrap();
+            }
+        }),
+    );
+    let (host, client) = hosting(services);
+    over_link(&host, client, |mux| {
+        let client = Client::new(mux);
+        let mut events = client.send_streaming_message(&user("x")).unwrap();
+        assert!(events.next().unwrap().is_ok());
+        assert!(events.next().unwrap().is_ok());
+        let end = events.next();
+        assert!(
+            matches!(end, Some(Err(ClientError::Interrupted))),
+            "{end:?}"
+        );
+        assert!(events.next().is_none());
+    });
+
+    // With no item at all, a single-answer operation and a stream both say so.
+    let services = Services::default().with(
+        PROTOCOL,
+        Box::new(|stream: &dyn LinkStream, _| {
+            let _ = stream.receive(Some(WAIT));
+        }),
+    );
+    let (host, client) = hosting(services);
+    over_link(&host, client, |mux| {
+        let client = Client::new(mux);
+        let call = client.send_message(&user("x"));
+        assert!(matches!(call, Err(ClientError::Interrupted)), "{call:?}");
+        let stream = client.send_streaming_message(&user("x"));
+        assert!(
+            matches!(stream, Err(ClientError::Interrupted)),
+            "{stream:?}"
         );
     });
 }

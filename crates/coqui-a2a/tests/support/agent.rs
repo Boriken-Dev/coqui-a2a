@@ -18,13 +18,19 @@ use coqui_a2a::model::{
 use coqui_a2a::{Agent, Caller, Events, Watch};
 
 /// An in-memory agent. Text "hold" makes a task that stays working until it is canceled,
-/// "fail:<Name>" answers that error, "panic" panics, anything else completes at once.
+/// "fail:<Name>" answers that error, "panic" panics, "wait" answers only once the client is gone,
+/// "big:<count>:<bytes>" streams that many chunks of that size and completes, "flood:<bytes>" streams
+/// chunks of that size for ever, anything else completes at once.
 #[derive(Clone, Default)]
 pub struct Echo {
     tasks: Arc<Mutex<BTreeMap<String, Task>>>,
     counter: Arc<AtomicUsize>,
     /// Subscriptions whose iterator has been dropped.
     pub ended: Arc<AtomicUsize>,
+    /// Chunks handed over by "big" and "flood".
+    pub produced: Arc<AtomicUsize>,
+    /// Times the card was asked for, which is once for every operation that reaches this agent.
+    pub cards: Arc<AtomicUsize>,
 }
 
 impl Echo {
@@ -84,6 +90,50 @@ impl Echo {
         Ok(task)
     }
 
+    /// A running task's chunks of `bytes` bytes, as many as `count` says, then its completion.
+    fn chunks(&self, task: Task, count: Option<usize>, bytes: usize) -> Events {
+        let (id, context) = (task.id.clone(), task.context_id.clone().unwrap_or_default());
+        let produced = Arc::clone(&self.produced);
+        let mut first = Some(task);
+        let mut sent = 0;
+        let inner = std::iter::from_fn(move || {
+            if let Some(mut task) = first.take() {
+                task.status = TaskStatus::now(TaskState::Working);
+                return Some(Ok(StreamResponse::Task(task)));
+            }
+            if count.is_some_and(|count| sent > count) {
+                return None;
+            }
+            sent += 1;
+            if count.is_some_and(|count| sent > count) {
+                return Some(Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                    task_id: id.clone(),
+                    context_id: context.clone(),
+                    status: TaskStatus::now(TaskState::Completed),
+                    ..TaskStatusUpdateEvent::default()
+                })));
+            }
+            produced.fetch_add(1, Ordering::SeqCst);
+            Some(Ok(StreamResponse::ArtifactUpdate(
+                TaskArtifactUpdateEvent {
+                    task_id: id.clone(),
+                    context_id: context.clone(),
+                    artifact: Artifact {
+                        artifact_id: "chunks".to_owned(),
+                        parts: vec![Part::text("a".repeat(bytes))],
+                        ..Artifact::default()
+                    },
+                    append: Some(sent > 1),
+                    ..TaskArtifactUpdateEvent::default()
+                },
+            )))
+        });
+        Box::new(Counted {
+            inner,
+            ended: Arc::clone(&self.ended),
+        })
+    }
+
     /// The task as it is, then its end, polling the store while it is quiet.
     fn follow(&self, task: Task, watch: Watch) -> Events {
         let (store, id) = (self.clone(), task.id.clone());
@@ -140,6 +190,7 @@ impl<I: Iterator> Iterator for Counted<I> {
 
 impl Agent for Echo {
     fn agent_card(&self, _caller: &Caller<'_>) -> AgentCard {
+        self.cards.fetch_add(1, Ordering::SeqCst);
         AgentCard {
             name: "Echo".to_owned(),
             description: "Repeats what it is told".to_owned(),
@@ -164,9 +215,15 @@ impl Agent for Echo {
 
     fn send_message(
         &self,
-        _caller: &Caller<'_>,
+        caller: &Caller<'_>,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2aError> {
+        if request.message.joined_text() == "wait" {
+            while caller.is_open() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            self.ended.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(SendMessageResponse::Task(self.task_for(&request)?))
     }
 
@@ -178,6 +235,17 @@ impl Agent for Echo {
         let task = self.task_for(&request)?;
         if task.status.state == TaskState::Working {
             return Ok(self.follow(task, caller.watch()));
+        }
+        let text = request.message.joined_text();
+        let numbers: Vec<usize> = text
+            .split(':')
+            .skip(1)
+            .filter_map(|number| number.parse().ok())
+            .collect();
+        match (text.split(':').next(), numbers.as_slice()) {
+            (Some("big"), [count, bytes]) => return Ok(self.chunks(task, Some(*count), *bytes)),
+            (Some("flood"), [bytes]) => return Ok(self.chunks(task, None, *bytes)),
+            _ => {}
         }
         let (id, context) = (task.id.clone(), task.context_id.clone().unwrap_or_default());
         let chunk = |text: &str, first: bool, last: bool| {
