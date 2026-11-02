@@ -1633,7 +1633,8 @@ mod tests {
                 assert!(hub.submit(job));
                 let mut read = 0;
                 let mut quiet = 0;
-                while quiet < 20 {
+                // A second with nothing read: a relay that is only slow is not what this is about.
+                while quiet < 50 {
                     thread::sleep(Duration::from_millis(20));
                     let now = flood.read.load(Ordering::SeqCst);
                     quiet = if now == read { quiet + 1 } else { 0 };
@@ -1689,6 +1690,67 @@ mod tests {
         };
         assert!(answer.is_error);
         assert!(answer.text.contains("-32006"), "{}", answer.text);
+    }
+
+    /// A peer that opens one stream toward the command, and keeps what it hears about it.
+    #[derive(Default)]
+    struct Opener {
+        opened: AtomicBool,
+        answers: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl Channel for Opener {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            self.answers.lock().unwrap().push(message.to_vec());
+            Ok(())
+        }
+
+        fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            if self.opened.swap(true, Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+                return Err(Failure::Timeout);
+            }
+            Ok(Some(
+                Frame::Open {
+                    stream: 2,
+                    protocol: "a2a/1".to_owned(),
+                    metadata: Vec::new(),
+                }
+                .encode(),
+            ))
+        }
+
+        fn close(&self) {}
+    }
+
+    #[test]
+    fn a_stream_the_peer_opens_is_refused_and_holds_nothing() {
+        let opener = Opener::default();
+        let hub = Hub::new();
+        Mux::run(&opener, Side::Dialed, Limits::default(), None, |mux| {
+            thread::scope(|scope| {
+                scope.spawn(|| hub.attach(mux));
+                let until = Instant::now() + Duration::from_secs(10);
+                let refused = |answer: &Vec<u8>| {
+                    matches!(
+                        Frame::decode(answer),
+                        Some(Frame::Close {
+                            stream: 2,
+                            reason: CloseReason::Refused,
+                            ..
+                        })
+                    )
+                };
+                while !opener.answers.lock().unwrap().iter().any(refused) {
+                    assert!(
+                        Instant::now() < until,
+                        "a stream the peer opened was left open"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                hub.close();
+            });
+        });
     }
 
     /// A peer that answers every request with a card naming it, until told the link is over.

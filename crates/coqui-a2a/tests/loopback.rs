@@ -657,6 +657,46 @@ fn http_clients_that_leave_let_go_of_their_streams() {
 }
 
 #[test]
+fn past_the_links_limit_on_streams_a_client_is_told_so_and_a_free_place_is_used() {
+    with_echo(
+        |config| config,
+        |endpoint| {
+            let held: Vec<TcpStream> = (0..16)
+                .map(|_| {
+                    let mut stream = started(endpoint.address, "SendStreamingMessage", "hold");
+                    assert!(first_event(&mut stream).contains("\"task\""));
+                    stream
+                })
+                .collect();
+            let refused = post(
+                endpoint.address,
+                "",
+                &rpc("1", "SendMessage", &message("seventeenth")),
+            )
+            .json();
+            assert_eq!(refused["error"]["code"], -32603);
+            let said = refused["error"]["message"].as_str().unwrap();
+            assert!(said.contains("too many"), "{said}");
+            drop(held);
+            endpoint.released(16, "the clients left and their streams stayed open");
+            let until = Instant::now() + WAIT;
+            loop {
+                let reply = post(
+                    endpoint.address,
+                    "",
+                    &rpc("1", "SendMessage", &message("after")),
+                );
+                if reply.body.contains("echo: after") {
+                    break;
+                }
+                assert!(Instant::now() < until, "{}", reply.body);
+                thread::sleep(Duration::from_millis(20));
+            }
+        },
+    );
+}
+
+#[test]
 fn a_client_that_stops_reading_holds_up_nothing_else_and_never_reads_a_clean_end() {
     let _hang = Watchdog::start(
         Duration::from_secs(60),
