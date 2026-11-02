@@ -448,6 +448,14 @@ impl Job {
             if gone() || hub.is_closed() {
                 return Waited::GaveUp;
             }
+            // With nothing of this stream's share left, a message read now could only wait in memory.
+            if own.is_some_and(|own| own.available_permits() == 0) {
+                if mux.link_state() != LinkState::Up {
+                    return Waited::GaveUp;
+                }
+                thread::sleep(FULL_POLL);
+                continue;
+            }
             match events.poll(Some(POLL)) {
                 Polled::Quiet => {
                     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -486,7 +494,10 @@ impl Job {
                 };
                 // Outside a string these are only spacing, and inside one JSON does not allow them. An
                 // event's data holds neither.
-                Ok(text.replace(['\r', '\n'], " "))
+                if text.contains(['\r', '\n']) {
+                    return Ok(text.replace(['\r', '\n'], " "));
+                }
+                Ok(text)
             }
             (None, Some(error)) if error.get().len() <= MAX_ERROR => {
                 let error = serde_json::from_str(error.get())
@@ -1660,6 +1671,14 @@ mod tests {
         assert_eq!(queued.len(), 7);
         assert_eq!(read, 8);
         assert!(free > 60 << 20, "only {free} left");
+    }
+
+    #[test]
+    fn a_stream_with_no_share_left_is_not_read() {
+        // One answer spends all a stream may have waiting, so the next stays in the link's window.
+        let (read, _, queued) = held(&flood_of(3 << 20), 64 << 20);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(read, 1);
     }
 
     #[test]
