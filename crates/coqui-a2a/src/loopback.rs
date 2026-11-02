@@ -8,39 +8,61 @@
 //!
 //! The link side is [`Hub::attach`], called with the mux of a proven link; the HTTP side is
 //! [`Loopback::start`], which owns a runtime of its own.
+//!
+//! What a slow client or a hostile agent can hold is bounded: connections by a cap, an unfinished
+//! request by a timeout, a client that stopped reading by a stall limit on the socket, and the
+//! answers waiting to be written by a budget in bytes, which the agent feels as the stream's window.
 
 use core::fmt;
+use core::future::Future;
+use core::pin::{Pin, pin};
+use core::task::{Context, Poll, ready};
 use core::time::Duration;
+use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
+use std::time::Instant;
 
 use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Request as HttpRequest, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{FromRequest as _, Request as HttpRequest, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::{get, post};
-use coqui_agentic_peer::mux::{LinkState, Mux};
-use coqui_web::Channel;
-use futures_util::StreamExt as _;
+use coqui_agentic_peer::mux::{CloseReason, LinkState, Mux};
+use coqui_web::{Channel, Failure};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::time::{Sleep, sleep, timeout};
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, ClientError, Polled, RawEvents};
 use crate::error::{A2aError, ErrorKind};
-use crate::wire::{Method, ServiceParameters};
+use crate::wire::{Method, RawResponse, ServiceParameters};
 use crate::{A2A_VERSION, PROTOCOL};
 
-/// How often an attached link looks for a job and for its own end.
+/// How often an attached link looks for a job and for its own end, and a job for its client.
 const POLL: Duration = Duration::from_millis(100);
-/// Items of one stream waiting for an HTTP client that reads slowly.
+/// How often a job tries for room to put an answer.
+const FULL_POLL: Duration = Duration::from_millis(2);
+/// Answers of one stream waiting for an HTTP client that reads slowly.
 const STREAM_BACKLOG: usize = 16;
+/// The bytes one stream may have waiting, unless a single answer is larger: so one client that stopped
+/// reading holds up its own stream and not the budget every stream shares.
+const STREAM_BYTES: usize = 2 << 20;
+/// The largest card this endpoint reads, since a card is the one answer it has to parse.
+const MAX_CARD: usize = 1 << 20;
+/// The largest error this endpoint reads. One is a code and a short message.
+const MAX_ERROR: usize = 64 << 10;
+/// What a client past the connection cap is told, before anything it sent is read.
+const BUSY: &[u8] =
+    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 
 /// Why the endpoint could not start.
 #[derive(Debug)]
@@ -83,6 +105,11 @@ pub struct Config {
     origins: Vec<String>,
     token: Option<String>,
     max_body: usize,
+    max_connections: usize,
+    request_timeout: Duration,
+    write_stall: Duration,
+    answer_timeout: Duration,
+    max_buffered: usize,
 }
 
 impl fmt::Debug for Config {
@@ -92,6 +119,11 @@ impl fmt::Debug for Config {
             .field("origins", &self.origins)
             .field("token", &self.token.as_ref().map(|_| "set"))
             .field("max_body", &self.max_body)
+            .field("max_connections", &self.max_connections)
+            .field("request_timeout", &self.request_timeout)
+            .field("write_stall", &self.write_stall)
+            .field("answer_timeout", &self.answer_timeout)
+            .field("max_buffered", &self.max_buffered)
             .finish()
     }
 }
@@ -111,6 +143,11 @@ impl Config {
             origins: Vec::new(),
             token: None,
             max_body: 1 << 20,
+            max_connections: 64,
+            request_timeout: Duration::from_secs(10),
+            write_stall: Duration::from_secs(30),
+            answer_timeout: Duration::from_secs(300),
+            max_buffered: 64 << 20,
         })
     }
 
@@ -136,26 +173,350 @@ impl Config {
         self.max_body = bytes;
         self
     }
+
+    /// Sets how many connections are open at once, 64 by default. Past it a connection is answered
+    /// 503 and closed. Each connection carries one request.
+    #[must_use]
+    pub fn with_max_connections(mut self, connections: usize) -> Self {
+        self.max_connections = connections;
+        self
+    }
+
+    /// Sets how long a client has to send its request once connected, head and body each, 10 seconds
+    /// by default. Past it the connection is closed.
+    #[must_use]
+    pub fn with_request_timeout(mut self, limit: Duration) -> Self {
+        self.request_timeout = limit;
+        self
+    }
+
+    /// Sets how long a client may leave the socket full while an answer waits, 30 seconds by default.
+    /// Past it the connection is closed with the answer unfinished, and the stream on the link with it.
+    #[must_use]
+    pub fn with_write_stall(mut self, limit: Duration) -> Self {
+        self.write_stall = limit;
+        self
+    }
+
+    /// Sets how long the agent has to say anything to an operation, 300 seconds by default. `SendMessage`
+    /// blocks until the task settles, so a longer task needs more, or `returnImmediately` and `GetTask`.
+    /// A stream that has begun may then be quiet for as long as it likes.
+    #[must_use]
+    pub fn with_answer_timeout(mut self, limit: Duration) -> Self {
+        self.answer_timeout = limit;
+        self
+    }
+
+    /// Sets how many bytes of answers may wait for HTTP clients, 64 MiB by default, across every
+    /// connection. An answer larger than this is `InvalidAgentResponseError`.
+    #[must_use]
+    pub fn with_max_buffered(mut self, bytes: usize) -> Self {
+        self.max_buffered = bytes;
+        self
+    }
 }
 
 fn is_loopback(ip: IpAddr) -> bool {
     coqui_agentic_peer::forward::is_loopback(ip)
 }
 
+/// An answer on its way to an HTTP client, and its share of what may wait.
+struct Relayed {
+    /// JSON: a whole JSON-RPC response, or for [`Form::Bare`] a result's own value.
+    text: String,
+    is_error: bool,
+    shares: Shares,
+}
+
+/// Given back when the answer has been handed to the socket.
+struct Shares {
+    _budget: Option<OwnedSemaphorePermit>,
+    _stream: Option<OwnedSemaphorePermit>,
+}
+
+impl Shares {
+    const NONE: Self = Self {
+        _budget: None,
+        _stream: None,
+    };
+}
+
+/// What a stream's queue holds. Only [`Item::End`] ends the HTTP response in order: a queue closed
+/// without it is a stream given up on, whose client must not read it as whole.
+enum Item {
+    Answer(Relayed),
+    End,
+}
+
+/// What a job's result is wrapped in.
+enum Form {
+    /// As a response with this id, as JSON text.
+    Response(String),
+    /// Not at all, for a card this endpoint still has to rewrite. An error is still a response, with
+    /// this id.
+    Bare(String),
+}
+
+/// Where a job's answers go.
+enum Reply {
+    One(oneshot::Sender<Relayed>),
+    Many(mpsc::Sender<Item>),
+}
+
 /// One operation waiting for the link.
-enum Job {
-    Call {
-        method: Method,
-        params: Value,
-        parameters: ServiceParameters,
-        reply: oneshot::Sender<Result<Value, A2aError>>,
-    },
-    Stream {
-        method: Method,
-        params: Value,
-        parameters: ServiceParameters,
-        items: mpsc::Sender<Result<Value, A2aError>>,
-    },
+struct Job {
+    method: Method,
+    params: Value,
+    parameters: ServiceParameters,
+    answer_timeout: Duration,
+    budget: Arc<Semaphore>,
+    max_buffered: usize,
+    form: Form,
+    reply: Reply,
+}
+
+/// What came of waiting for the next answer.
+enum Waited {
+    Answer(Relayed),
+    End,
+    Failed(A2aError),
+    /// Nobody is there to tell, or the queue cannot be reached before the link's end.
+    GaveUp,
+}
+
+impl Job {
+    fn id_text(&self) -> &str {
+        match &self.form {
+            Form::Response(id) | Form::Bare(id) => id,
+        }
+    }
+
+    /// Answers `error`, with nothing else to come.
+    fn refuse(self, error: &A2aError) {
+        let answer = Relayed {
+            text: error_text(self.id_text(), error),
+            is_error: true,
+            shares: Shares::NONE,
+        };
+        match self.reply {
+            Reply::One(reply) => {
+                let _ = reply.send(answer);
+            }
+            Reply::Many(items) => {
+                // A queue with nothing in it yet, so there is room for both.
+                let _ = items.try_send(Item::Answer(answer));
+                let _ = items.try_send(Item::End);
+            }
+        }
+    }
+
+    fn run<C: Channel>(self, hub: &Hub, mux: &Mux<'_, C>) {
+        let client = Client::new(mux).with_service_parameters(self.parameters.clone());
+        let events = match client.begin(self.method, self.params.clone()) {
+            Ok(events) => events,
+            Err(error) => return self.refuse(&into_error(error)),
+        };
+        let deadline = Instant::now() + self.answer_timeout;
+        match &self.reply {
+            Reply::One(reply) => {
+                let gone = || reply.is_closed();
+                let answer = match self.next_answer(&events, hub, mux, &gone, None, Some(deadline))
+                {
+                    Waited::Answer(answer) => answer,
+                    Waited::End => self.failure(&into_error(ClientError::Interrupted)),
+                    Waited::Failed(error) => self.failure(&error),
+                    Waited::GaveUp => return,
+                };
+                let Reply::One(reply) = self.reply else {
+                    return;
+                };
+                let _ = reply.send(answer);
+            }
+            Reply::Many(items) => {
+                let own = Arc::new(Semaphore::new(STREAM_BYTES));
+                let gone = || items.is_closed();
+                let mut deadline = Some(deadline);
+                loop {
+                    match self.next_answer(&events, hub, mux, &gone, Some(&own), deadline) {
+                        Waited::Answer(answer) => {
+                            deadline = None;
+                            if !deliver(hub, mux, items, Item::Answer(answer)) {
+                                return;
+                            }
+                        }
+                        Waited::End if deadline.is_none() => {
+                            deliver(hub, mux, items, Item::End);
+                            return;
+                        }
+                        Waited::End => {
+                            let failure = self.failure(&into_error(ClientError::Interrupted));
+                            deliver(hub, mux, items, Item::Answer(failure));
+                            deliver(hub, mux, items, Item::End);
+                            return;
+                        }
+                        Waited::Failed(error) => {
+                            deliver(hub, mux, items, Item::Answer(self.failure(&error)));
+                            deliver(hub, mux, items, Item::End);
+                            return;
+                        }
+                        Waited::GaveUp => return,
+                    }
+                }
+            }
+        }
+    }
+
+    fn failure(&self, error: &A2aError) -> Relayed {
+        Relayed {
+            text: error_text(self.id_text(), error),
+            is_error: true,
+            shares: Shares::NONE,
+        }
+    }
+
+    /// Waits for the next answer while watching the client: a quiet stream must not hide that nobody
+    /// is reading it, since a stream left open counts against the link's limit.
+    fn next_answer<C: Channel>(
+        &self,
+        events: &RawEvents<'_, C>,
+        hub: &Hub,
+        mux: &Mux<'_, C>,
+        gone: &dyn Fn() -> bool,
+        own: Option<&Arc<Semaphore>>,
+        deadline: Option<Instant>,
+    ) -> Waited {
+        loop {
+            if gone() || hub.is_closed() {
+                return Waited::GaveUp;
+            }
+            match events.poll(Some(POLL)) {
+                Polled::Quiet => {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        return Waited::Failed(into_error(ClientError::Timeout));
+                    }
+                }
+                Polled::Finished => return Waited::End,
+                Polled::Failed(error) => return Waited::Failed(into_error(error)),
+                Polled::Message(bytes) => {
+                    return match self.render(&events.request_id(), &bytes) {
+                        Ok(text) => self.reserve(text, hub, mux, gone, own),
+                        Err(error) => Waited::Failed(error),
+                    };
+                }
+            }
+        }
+    }
+
+    /// The text of a message from the peer, or the error it holds.
+    fn render(&self, request_id: &str, bytes: &[u8]) -> Result<String, A2aError> {
+        let malformed = || into_error(ClientError::Malformed("not a response"));
+        let response = RawResponse::decode(bytes).ok_or_else(malformed)?;
+        // A server answers with the request's id, or null when it could not read one.
+        if response.id.is_some_and(|id| id.get() != request_id) {
+            return Err(malformed());
+        }
+        match (response.result, response.error) {
+            (Some(result), None) => {
+                let result = result.get();
+                let text = match &self.form {
+                    Form::Response(id) => {
+                        format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#)
+                    }
+                    Form::Bare(_) if result.len() > MAX_CARD => return Err(malformed()),
+                    Form::Bare(_) => result.to_owned(),
+                };
+                // Outside a string these are only spacing, and inside one JSON does not allow them. An
+                // event's data holds neither.
+                Ok(text.replace(['\r', '\n'], " "))
+            }
+            (None, Some(error)) if error.get().len() <= MAX_ERROR => {
+                let error = serde_json::from_str(error.get())
+                    .ok()
+                    .and_then(|error| A2aError::from_value(&error))
+                    .ok_or_else(malformed)?;
+                Err(error)
+            }
+            _ => Err(malformed()),
+        }
+    }
+
+    /// Takes a share for `text`, waiting for room while the client is there. Until then this stream is
+    /// not read, so it is the agent's send that waits, for the stream's window.
+    fn reserve<C: Channel>(
+        &self,
+        text: String,
+        hub: &Hub,
+        mux: &Mux<'_, C>,
+        gone: &dyn Fn() -> bool,
+        own: Option<&Arc<Semaphore>>,
+    ) -> Waited {
+        let Ok(cost) = u32::try_from(text.len()) else {
+            return Waited::Failed(too_large());
+        };
+        if text.len() > self.max_buffered {
+            return Waited::Failed(too_large());
+        }
+        let own_cost = cost.min(u32::try_from(STREAM_BYTES).unwrap_or(u32::MAX));
+        loop {
+            let stream = match own {
+                Some(own) => Arc::clone(own).try_acquire_many_owned(own_cost).map(Some),
+                None => Ok(None),
+            };
+            if let Ok(stream) = stream
+                && let Ok(budget) = Arc::clone(&self.budget).try_acquire_many_owned(cost)
+            {
+                return Waited::Answer(Relayed {
+                    text,
+                    is_error: false,
+                    shares: Shares {
+                        _budget: Some(budget),
+                        _stream: stream,
+                    },
+                });
+            }
+            if gone() || hub.is_closed() || mux.link_state() != LinkState::Up {
+                return Waited::GaveUp;
+            }
+            thread::sleep(FULL_POLL);
+        }
+    }
+}
+
+/// Puts `item` on the queue, unless nobody is there or the link's end will not wait for room: a
+/// client that stopped reading must not keep [`Hub::attach`] from returning. Whoever reads the queue
+/// then sees it close with no [`Item::End`].
+fn deliver<C: Channel>(
+    hub: &Hub,
+    mux: &Mux<'_, C>,
+    items: &mpsc::Sender<Item>,
+    item: Item,
+) -> bool {
+    let mut item = item;
+    loop {
+        match items.try_send(item) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(back)) => {
+                if hub.is_closed() || mux.link_state() != LinkState::Up {
+                    return false;
+                }
+                item = back;
+                thread::sleep(FULL_POLL);
+            }
+        }
+    }
+}
+
+fn too_large() -> A2aError {
+    A2aError::new(
+        ErrorKind::InvalidAgentResponse,
+        "the answer is too large for this endpoint",
+    )
+}
+
+fn error_text(id: &str, error: &A2aError) -> String {
+    let error = error.to_value();
+    format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{error}}}"#)
 }
 
 /// Where the endpoint's operations go: to whichever link is attached.
@@ -187,12 +548,14 @@ impl Hub {
             .is_some()
     }
 
-    fn submit(&self, job: Job) -> Result<(), Job> {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Queues `job`. `false` when no link is attached.
+    fn submit(&self, job: Job) -> bool {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        match jobs.as_ref() {
-            Some(sender) => sender.send(job).map_err(|rejected| rejected.0),
-            None => Err(job),
-        }
+        jobs.as_ref().is_some_and(|sender| sender.send(job).is_ok())
     }
 
     /// Ends the hub for good: a running [`Hub::attach`] returns, a later one returns at once, and
@@ -211,12 +574,20 @@ impl Hub {
             loop {
                 match jobs.recv_timeout(POLL) {
                     Ok(job) => {
-                        scope.spawn(move || run_job(mux, job));
+                        scope.spawn(move || Job::run(job, self, mux));
                     }
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                if self.closed.load(Ordering::SeqCst) || mux.link_state() != LinkState::Up {
+                // Nothing here serves a stream the peer opens, and one left waiting holds its bytes.
+                while let Ok(Some(incoming)) = mux.accept(Some(Duration::ZERO)) {
+                    scope.spawn(move || {
+                        incoming
+                            .stream
+                            .close_with(CloseReason::Refused, "this side serves nothing");
+                    });
+                }
+                if self.is_closed() || mux.link_state() != LinkState::Up {
                     break;
                 }
             }
@@ -224,55 +595,7 @@ impl Hub {
         // Operations that arrived while the link was ending are answered, not left waiting.
         *self.jobs.lock().unwrap_or_else(PoisonError::into_inner) = None;
         while let Ok(job) = jobs.try_recv() {
-            refuse(job);
-        }
-    }
-}
-
-fn refuse(job: Job) {
-    let error = A2aError::new(ErrorKind::Internal, "the link is down");
-    match job {
-        Job::Call { reply, .. } => {
-            let _ = reply.send(Err(error));
-        }
-        Job::Stream { items, .. } => {
-            let _ = items.blocking_send(Err(error));
-        }
-    }
-}
-
-fn run_job<C: Channel>(mux: &Mux<'_, C>, job: Job) {
-    match job {
-        Job::Call {
-            method,
-            params,
-            parameters,
-            reply,
-        } => {
-            let client = Client::new(mux).with_service_parameters(parameters);
-            let _ = reply.send(client.call_raw(method, params).map_err(into_error));
-        }
-        Job::Stream {
-            method,
-            params,
-            parameters,
-            items,
-        } => {
-            let client = Client::new(mux).with_service_parameters(parameters);
-            match client.stream_raw(method, params) {
-                Ok(events) => {
-                    for item in events {
-                        let failed = item.is_err();
-                        // The HTTP client leaving closes the channel, which closes the stream.
-                        if items.blocking_send(item.map_err(into_error)).is_err() || failed {
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = items.blocking_send(Err(into_error(error)));
-                }
-            }
+            job.refuse(&A2aError::new(ErrorKind::Internal, "the link is down"));
         }
     }
 }
@@ -299,6 +622,11 @@ fn into_error(error: ClientError) -> A2aError {
         ClientError::TooLarge => {
             A2aError::new(ErrorKind::InvalidRequest, "the request is too large")
         }
+        // What `Mux::open` answers past the link's limit on streams.
+        ClientError::Link(Failure::NoProgress) => A2aError::new(
+            ErrorKind::Internal,
+            "too many operations are running on the link",
+        ),
         _ => A2aError::new(ErrorKind::Internal, "the link failed"),
     }
 }
@@ -324,6 +652,10 @@ struct Shared {
     origins: Arc<Vec<String>>,
     token: Option<Arc<String>>,
     address: SocketAddr,
+    request_timeout: Duration,
+    answer_timeout: Duration,
+    budget: Arc<Semaphore>,
+    max_buffered: usize,
 }
 
 impl Loopback {
@@ -345,13 +677,24 @@ impl Loopback {
             origins: Arc::new(config.origins),
             token: config.token.map(Arc::new),
             address,
+            request_timeout: config.request_timeout,
+            answer_timeout: config.answer_timeout,
+            budget: Arc::new(Semaphore::new(
+                config.max_buffered.min(Semaphore::MAX_PERMITS),
+            )),
+            max_buffered: config.max_buffered,
         };
         let app = Router::new()
             .route("/", post(rpc))
             .route("/.well-known/agent-card.json", get(card))
-            .layer(DefaultBodyLimit::max(config.max_body))
+            .layer(axum::extract::DefaultBodyLimit::max(config.max_body))
             .layer(middleware::from_fn_with_state(state.clone(), guard))
             .with_state(state);
+        let limits = Connections {
+            request_timeout: config.request_timeout,
+            write_stall: config.write_stall,
+        };
+        let slots = Arc::new(Semaphore::new(config.max_connections));
         let (stop, stopped) = oneshot::channel::<()>();
         let thread = thread::Builder::new()
             .name("coqui-a2a-loopback".to_owned())
@@ -360,9 +703,8 @@ impl Loopback {
                     let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
                         return;
                     };
-                    let serve = axum::serve(listener, app).into_future();
-                    futures_util::pin_mut!(serve);
-                    let _ = futures_util::future::select(serve, stopped).await;
+                    let accepting = pin!(accept(listener, app, limits, slots));
+                    let _ = futures_util::future::select(accepting, stopped).await;
                 };
                 runtime.block_on(serving);
                 runtime.shutdown_timeout(Duration::from_millis(500));
@@ -389,6 +731,141 @@ impl Drop for Loopback {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// What holds a connection to account.
+#[derive(Clone, Copy)]
+struct Connections {
+    request_timeout: Duration,
+    write_stall: Duration,
+}
+
+async fn accept(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    limits: Connections,
+    slots: Arc<Semaphore>,
+) {
+    loop {
+        let Ok((socket, _)) = listener.accept().await else {
+            // Out of descriptors, say: the same again at once would only spin.
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        };
+        let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+            let _ = socket.try_write(BUSY);
+            continue;
+        };
+        let app = app.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            connection(socket, app, limits).await;
+        });
+    }
+}
+
+/// Serves one request. A connection is never kept for another, so all a connection can hold on to is
+/// the time to send its request and the time its answer takes.
+async fn connection(socket: TcpStream, app: Router, limits: Connections) {
+    let _ = socket.set_nodelay(true);
+    let requested = Arc::new(Notify::new());
+    let heard = Arc::clone(&requested);
+    let service = hyper_util::service::TowerToHyperService::new(app);
+    let serving = hyper::server::conn::http1::Builder::new()
+        .keep_alive(false)
+        .serve_connection(
+            hyper_util::rt::TokioIo::new(Stalling::new(socket, limits.write_stall)),
+            hyper::service::service_fn(move |request| {
+                heard.notify_one();
+                hyper::service::Service::call(&service, request)
+            }),
+        );
+    let head = async {
+        if timeout(limits.request_timeout, requested.notified())
+            .await
+            .is_ok()
+        {
+            core::future::pending::<()>().await;
+        }
+    };
+    let _ = futures_util::future::select(pin!(serving), pin!(head)).await;
+}
+
+/// A socket whose writes fail when the other side has taken nothing for a while, so a client that
+/// stopped reading loses its connection, and with it its place on the link.
+struct Stalling {
+    socket: TcpStream,
+    limit: Duration,
+    since: Option<Pin<Box<Sleep>>>,
+}
+
+impl Stalling {
+    const fn new(socket: TcpStream, limit: Duration) -> Self {
+        Self {
+            socket,
+            limit,
+            since: None,
+        }
+    }
+
+    fn watched(
+        &mut self,
+        cx: &mut Context<'_>,
+        written: Poll<io::Result<usize>>,
+    ) -> Poll<io::Result<usize>> {
+        if written.is_ready() {
+            self.since = None;
+            return written;
+        }
+        let limit = self.limit;
+        let since = self.since.get_or_insert_with(|| Box::pin(sleep(limit)));
+        ready!(since.as_mut().poll(cx));
+        Poll::Ready(Err(io::ErrorKind::TimedOut.into()))
+    }
+}
+
+impl AsyncRead for Stalling {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().socket).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Stalling {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let written = Pin::new(&mut this.socket).poll_write(cx, buf);
+        this.watched(cx, written)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let written = Pin::new(&mut this.socket).poll_write_vectored(cx, bufs);
+        this.watched(cx, written)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.socket.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().socket).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().socket).poll_shutdown(cx)
     }
 }
 
@@ -486,7 +963,43 @@ fn rpc_error(status: StatusCode, id: &Value, error: A2aError) -> HttpResponse {
     json_response(status, &envelope(id, Err(error)))
 }
 
-async fn rpc(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> HttpResponse {
+impl Shared {
+    fn job(
+        &self,
+        method: Method,
+        params: Value,
+        parameters: ServiceParameters,
+        form: Form,
+        reply: Reply,
+    ) -> Job {
+        Job {
+            method,
+            params,
+            parameters,
+            answer_timeout: self.answer_timeout,
+            budget: Arc::clone(&self.budget),
+            max_buffered: self.max_buffered,
+            form,
+            reply,
+        }
+    }
+}
+
+async fn rpc(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    request: HttpRequest,
+) -> HttpResponse {
+    let body = match timeout(state.request_timeout, Bytes::from_request(request, &())).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(rejection)) => return rejection.into_response(),
+        Err(_) => {
+            return plain(
+                StatusCode::REQUEST_TIMEOUT,
+                "the request took too long to arrive",
+            );
+        }
+    };
     let json_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -550,52 +1063,91 @@ async fn rpc(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Ht
     };
     if method.streams() {
         let (items, mut receiver) = mpsc::channel(STREAM_BACKLOG);
-        let job = Job::Stream {
-            method,
-            params,
-            parameters,
-            items,
-        };
-        if state.hub.submit(job).is_err() {
+        let form = Form::Response(id.to_string());
+        let job = state.job(method, params, parameters, form, Reply::Many(items));
+        if !state.hub.submit(job) {
             return down(&id);
         }
         // An error before the first item is an ordinary JSON answer, as a client expects.
         let first = match receiver.recv().await {
-            Some(Ok(first)) => first,
-            Some(Err(error)) => return rpc_error(StatusCode::OK, &id, error),
-            None => return down(&id),
+            Some(Item::Answer(first)) => first,
+            Some(Item::End) | None => return down(&id),
         };
-        let rest = ReceiverStream::new(receiver);
-        let events = futures_util::stream::once(async move { Ok(first) })
-            .chain(rest)
-            .map(move |item: Result<Value, A2aError>| {
-                let message = envelope(&id, item);
-                Ok::<_, core::convert::Infallible>(Event::default().data(message.to_string()))
-            });
-        return Sse::new(events).into_response();
+        if first.is_error {
+            return answered(StatusCode::OK, first);
+        }
+        return Sse::new(events(first, receiver)).into_response();
     }
-    let (reply, answer) = oneshot::channel();
-    let job = Job::Call {
-        method,
-        params,
-        parameters,
-        reply,
+    // The extended card names the link too, which a client of this endpoint cannot use.
+    let form = if method == Method::GetExtendedAgentCard {
+        Form::Bare(id.to_string())
+    } else {
+        Form::Response(id.to_string())
     };
-    if state.hub.submit(job).is_err() {
+    let bare = matches!(form, Form::Bare(_));
+    let (reply, answer) = oneshot::channel();
+    let job = state.job(method, params, parameters, form, Reply::One(reply));
+    if !state.hub.submit(job) {
         return down(&id);
     }
-    match answer.await {
-        Ok(mut outcome) => {
-            // The extended card names the link too, which a client of this endpoint cannot use.
-            if method == Method::GetExtendedAgentCard
-                && let Ok(card) = &mut outcome
-            {
-                rewrite_card(card, state.address);
-            }
-            json_response(StatusCode::OK, &envelope(&id, outcome))
-        }
-        Err(_) => down(&id),
+    let Ok(answer) = answer.await else {
+        return down(&id);
+    };
+    if !bare || answer.is_error {
+        return answered(StatusCode::OK, answer);
     }
+    let card = rewritten(&answer.text, state.address);
+    json_response(StatusCode::OK, &envelope(&id, card))
+}
+
+/// One answer as an HTTP response. Its share goes when the socket has taken it, or the connection has
+/// gone, since until then its bytes are still held here.
+fn answered(status: StatusCode, answer: Relayed) -> HttpResponse {
+    let Relayed { text, shares, .. } = answer;
+    let length = text.len();
+    let mut chunk = Some(Bytes::from(text));
+    let mut shares = Some(shares);
+    let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+        if let Some(chunk) = chunk.take() {
+            return Poll::Ready(Some(Ok::<_, core::convert::Infallible>(chunk)));
+        }
+        drop(shares.take());
+        Poll::Ready(None)
+    }));
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json".to_owned()),
+            (header::CONTENT_LENGTH, length.to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The events of a stream. Each answer's share goes when the next is asked for, by which time the
+/// server has written all but a small part of it. Ending with an error rather than in order closes
+/// the connection with the response unfinished, which is how HTTP says it was cut short.
+fn events(
+    first: Relayed,
+    mut receiver: mpsc::Receiver<Item>,
+) -> impl futures_util::Stream<Item = io::Result<Event>> + Send + 'static {
+    let mut next = Some(first);
+    let mut held = None;
+    futures_util::stream::poll_fn(move |cx| {
+        drop(held.take());
+        let answer = match next.take() {
+            Some(first) => first,
+            None => match ready!(receiver.poll_recv(cx)) {
+                Some(Item::Answer(answer)) => answer,
+                Some(Item::End) => return Poll::Ready(None),
+                None => return Poll::Ready(Some(Err(io::ErrorKind::ConnectionAborted.into()))),
+            },
+        };
+        let Relayed { text, shares, .. } = answer;
+        held = Some(shares);
+        Poll::Ready(Some(Ok(Event::default().data(text))))
+    })
 }
 
 fn down(id: &Value) -> HttpResponse {
@@ -613,25 +1165,36 @@ async fn card(State(state): State<Shared>, headers: HeaderMap) -> HttpResponse {
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, &Value::Null, error),
     };
     let (reply, answer) = oneshot::channel();
-    let job = Job::Call {
-        method: Method::GetAgentCard,
-        params: Value::Null,
+    let job = state.job(
+        Method::GetAgentCard,
+        Value::Null,
         parameters,
-        reply,
-    };
-    if state.hub.submit(job).is_err() {
+        Form::Bare(Value::Null.to_string()),
+        Reply::One(reply),
+    );
+    if !state.hub.submit(job) {
         return down(&Value::Null);
     }
-    let Ok(outcome) = answer.await else {
+    let Ok(answer) = answer.await else {
         return down(&Value::Null);
     };
-    match outcome {
-        Ok(mut card) => {
-            rewrite_card(&mut card, state.address);
-            json_response(StatusCode::OK, &card)
-        }
+    if answer.is_error {
+        return answered(StatusCode::BAD_GATEWAY, answer);
+    }
+    match rewritten(&answer.text, state.address) {
+        Ok(card) => json_response(StatusCode::OK, &card),
         Err(error) => rpc_error(StatusCode::BAD_GATEWAY, &Value::Null, error),
     }
+}
+
+/// A card as this endpoint serves it, from the JSON the agent sent.
+fn rewritten(text: &str, address: SocketAddr) -> Result<Value, A2aError> {
+    let mut card = serde_json::from_str::<Value>(text)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| into_error(ClientError::Malformed("not a card")))?;
+    rewrite_card(&mut card, address);
+    Ok(card)
 }
 
 /// Points the card at this endpoint. A signature covered the original interfaces, so it goes.
@@ -648,4 +1211,141 @@ fn rewrite_card(card: &mut Value, address: SocketAddr) {
         }]),
     );
     object.remove("signatures");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use coqui_agentic_peer::mux::{Frame, Limits, Side};
+
+    use super::*;
+
+    /// A peer that answers the first request with as many items as the stream's window lets it, and
+    /// counts what the client has read by the credit it gives back.
+    #[derive(Default)]
+    struct Flood {
+        item: Vec<u8>,
+        stream: Mutex<Option<u32>>,
+        sent: AtomicUsize,
+        read: AtomicUsize,
+    }
+
+    impl Channel for Flood {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            match Frame::decode(message) {
+                Some(Frame::Data { stream, .. }) => {
+                    *self.stream.lock().unwrap() = Some(stream);
+                }
+                Some(Frame::Credit { .. }) => {
+                    self.read.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            thread::sleep(Duration::from_millis(1));
+            let Some(stream) = *self.stream.lock().unwrap() else {
+                return Err(Failure::Timeout);
+            };
+            let unread = self.sent.load(Ordering::SeqCst) - self.read.load(Ordering::SeqCst);
+            if unread * self.item.len() >= 1 << 20 {
+                return Err(Failure::Timeout);
+            }
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(
+                Frame::Data {
+                    stream,
+                    body: self.item.clone(),
+                }
+                .encode(),
+            ))
+        }
+
+        fn close(&self) {}
+    }
+
+    fn flood_of(bytes: usize) -> Flood {
+        let text = "a".repeat(bytes);
+        Flood {
+            item: format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{text}"}}"#).into_bytes(),
+            ..Flood::default()
+        }
+    }
+
+    /// Runs a stream against `flood`, with nobody reading its queue, until the relay stops reading.
+    fn held(flood: &Flood, budget: usize) -> (usize, usize, Vec<Item>) {
+        let hub = Hub::new();
+        let shares = Arc::new(Semaphore::new(budget));
+        let (items, mut receiver) = mpsc::channel(STREAM_BACKLOG);
+        let job = Job {
+            method: Method::SubscribeToTask,
+            params: json!({ "id": "x" }),
+            parameters: ServiceParameters::new(),
+            answer_timeout: Duration::from_secs(10),
+            budget: Arc::clone(&shares),
+            max_buffered: budget,
+            form: Form::Response("1".to_owned()),
+            reply: Reply::Many(items),
+        };
+        Mux::run(flood, Side::Dialed, Limits::default(), None, |mux| {
+            thread::scope(|scope| {
+                scope.spawn(|| hub.attach(mux));
+                while !hub.is_up() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert!(hub.submit(job));
+                let mut read = 0;
+                let mut quiet = 0;
+                while quiet < 20 {
+                    thread::sleep(Duration::from_millis(20));
+                    let now = flood.read.load(Ordering::SeqCst);
+                    quiet = if now == read { quiet + 1 } else { 0 };
+                    read = now;
+                }
+                let free = shares.available_permits();
+                hub.close();
+                let mut queued = Vec::new();
+                while let Ok(item) = receiver.try_recv() {
+                    queued.push(item);
+                }
+                (read, free, queued)
+            })
+        })
+    }
+
+    const ITEM: usize = 256 << 10;
+
+    #[test]
+    fn what_waits_for_a_stopped_client_stays_within_the_budget() {
+        let flood = flood_of(ITEM);
+        let (read, free, queued) = held(&flood, 1 << 20);
+        // Three fit, as each is a little past 256 KiB with its envelope, and one more is read and waits.
+        assert_eq!(queued.len(), 3);
+        assert_eq!(read, 4, "the relay kept reading past what it may hold");
+        assert!(free < ITEM, "the budget should be spent, with {free} free");
+        // And the agent is held by the window, which is the point of not reading.
+        assert!(flood.sent.load(Ordering::SeqCst) * ITEM <= (1 << 20) + read * ITEM + ITEM);
+    }
+
+    #[test]
+    fn one_stopped_client_cannot_spend_the_whole_budget() {
+        let (read, free, queued) = held(&flood_of(ITEM), 64 << 20);
+        // Seven fit in the bytes one stream may have waiting.
+        assert_eq!(queued.len(), 7);
+        assert_eq!(read, 8);
+        assert!(free > 60 << 20, "only {free} left");
+    }
+
+    #[test]
+    fn an_answer_past_the_whole_budget_is_an_error_and_not_a_wait() {
+        let (_, _, queued) = held(&flood_of(2 * ITEM), ITEM);
+        let Some(Item::Answer(answer)) = queued.first() else {
+            panic!("no answer");
+        };
+        assert!(answer.is_error);
+        assert!(answer.text.contains("-32006"), "{}", answer.text);
+    }
 }

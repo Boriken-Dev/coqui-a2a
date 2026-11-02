@@ -197,6 +197,24 @@ impl<'m, 'c, C: Channel> Client<'m, 'c, C> {
         })
     }
 
+    /// Starts an operation and reads nothing of its answer, for a relay that waits on something
+    /// else as well.
+    #[cfg(feature = "loopback")]
+    pub(crate) fn begin(
+        &self,
+        method: Method,
+        params: Value,
+    ) -> Result<RawEvents<'c, C>, ClientError> {
+        let (stream, id) = self.open(method, params)?;
+        Ok(RawEvents {
+            stream,
+            id,
+            idle: None,
+            first: None,
+            done: false,
+        })
+    }
+
     fn call<P: Serialize, R: DeserializeOwned>(
         &self,
         method: Method,
@@ -337,6 +355,18 @@ fn read_response<C: Channel>(
     Ok(response)
 }
 
+/// What one look at a stream found.
+pub(crate) enum Polled {
+    /// A whole message.
+    Message(Vec<u8>),
+    /// Nothing within the time allowed. The stream goes on.
+    Quiet,
+    /// The peer finished it: what it sent is whole.
+    Finished,
+    /// It ended any other way.
+    Failed(ClientError),
+}
+
 /// The items of a streaming operation as JSON, until the stream finishes.
 pub struct RawEvents<'c, C: Channel> {
     stream: Stream<'c, C>,
@@ -354,6 +384,26 @@ impl<C: Channel> fmt::Debug for RawEvents<'_, C> {
     }
 }
 
+impl<C: Channel> RawEvents<'_, C> {
+    /// The next message, waiting at most `wait`.
+    pub(crate) fn poll(&self, wait: Option<Duration>) -> Polled {
+        match self.stream.receive(wait) {
+            Ok(Some(bytes)) => Polled::Message(bytes),
+            // An orderly close says nothing of the answer being whole: only the peer's finish does.
+            Ok(None) if self.stream.finished_by_peer() => Polled::Finished,
+            Ok(None) => Polled::Failed(ClientError::Interrupted),
+            Err(Failure::Timeout) => Polled::Quiet,
+            Err(failure) => Polled::Failed(why(&self.stream, failure)),
+        }
+    }
+
+    /// The id the request went out with, which a response repeats, as its JSON text.
+    #[cfg(feature = "loopback")]
+    pub(crate) fn request_id(&self) -> String {
+        self.id.to_string()
+    }
+}
+
 impl<C: Channel> Iterator for RawEvents<'_, C> {
     type Item = Result<Value, ClientError>;
 
@@ -366,16 +416,19 @@ impl<C: Channel> Iterator for RawEvents<'_, C> {
         if let Some(first) = self.first.take() {
             return Some(Ok(first));
         }
-        let message = match self.stream.receive(self.idle) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
+        let message = match self.poll(self.idle) {
+            Polled::Message(bytes) => bytes,
+            Polled::Finished => {
                 self.done = true;
-                // An orderly close says nothing of the answer being whole: only the peer's finish does.
-                return (!self.stream.finished_by_peer()).then_some(Err(ClientError::Interrupted));
+                return None;
             }
-            Err(failure) => {
+            Polled::Quiet => {
                 self.done = true;
-                return Some(Err(why(&self.stream, failure)));
+                return Some(Err(ClientError::Timeout));
+            }
+            Polled::Failed(error) => {
+                self.done = true;
+                return Some(Err(error));
             }
         };
         let item = Response::decode(&message)

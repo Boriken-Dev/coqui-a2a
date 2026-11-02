@@ -56,8 +56,9 @@ fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
         // The loopback endpoint's HTTP server.
         "axum",
         "tokio",
-        "tokio-stream",
         "futures-util",
+        "hyper",
+        "hyper-util",
         // The command line only.
         "clap",
         "coqui-peer-webcrypto",

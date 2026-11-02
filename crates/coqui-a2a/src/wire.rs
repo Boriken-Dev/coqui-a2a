@@ -350,3 +350,28 @@ impl Response {
         }
     }
 }
+
+/// A response read only as far as a relay needs. Nothing is built from `result` or `error`, so what a
+/// hostile peer sends costs its own size here, where a [`Value`] of small members costs many times that.
+#[cfg(feature = "loopback")]
+#[derive(serde::Deserialize)]
+pub(crate) struct RawResponse<'a> {
+    #[serde(borrow, default)]
+    pub(crate) id: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default)]
+    pub(crate) result: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default)]
+    pub(crate) error: Option<&'a serde_json::value::RawValue>,
+}
+
+#[cfg(feature = "loopback")]
+impl<'a> RawResponse<'a> {
+    /// Reads a response. `None` when the bytes are not a JSON object with no member twice.
+    pub(crate) fn decode(bytes: &'a [u8]) -> Option<Self> {
+        // A derived struct also reads from an array.
+        if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+            return None;
+        }
+        serde_json::from_slice(bytes).ok()
+    }
+}
