@@ -16,7 +16,7 @@ use coqui_a2a::model::{
 use coqui_a2a::wire::Method;
 use coqui_a2a::{BINDING, Client, ClientError, PROTOCOL, Server};
 use coqui_agentic_peer::link::{Services, capabilities};
-use coqui_agentic_peer::mux::LinkStream;
+use coqui_agentic_peer::mux::{LinkStream, StreamEnd};
 use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
 use coqui_web::Channel as _;
@@ -448,24 +448,23 @@ fn a_stream_carrying_an_operation_twice_is_refused() {
         let stream = mux.open(PROTOCOL).unwrap();
         stream.send(request).unwrap();
         stream.send(request).unwrap();
-        let mut ended = false;
-        for _ in 0..4 {
-            match stream.receive(Some(WAIT)) {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => {
-                    ended = true;
-                    break;
-                }
+        let mut answers = 0;
+        while let Ok(Some(_)) = stream.receive(Some(WAIT)) {
+            answers += 1;
+        }
+        // The server sees the second message before it answers, and refuses, or only after: then it
+        // has answered the first and said so with `finish`. The `Close` that follows a `finish` is a
+        // frame of its own, so `end` can still be `None` here.
+        match stream.end() {
+            Some(StreamEnd::Refused(reason)) => {
+                assert_eq!(reason, "one operation per stream");
+                assert_eq!(answers, 0, "a refused stream answers nothing");
+            }
+            end => {
+                assert!(stream.finished_by_peer(), "{end:?}");
+                assert_eq!(answers, 1, "the second operation is never run");
             }
         }
-        assert!(ended);
-        assert!(matches!(
-            stream.end(),
-            Some(
-                coqui_agentic_peer::mux::StreamEnd::Refused(_)
-                    | coqui_agentic_peer::mux::StreamEnd::PeerClosed
-            )
-        ));
 
         // Mid-stream, on a quiet subscription, a second message ends it within the poll.
         let SendMessageResponse::Task(held) = Client::new(mux).send_message(&user("hold")).unwrap()
@@ -484,10 +483,7 @@ fn a_stream_carrying_an_operation_twice_is_refused() {
         sub.send(subscribe.as_bytes()).unwrap();
         let cut = sub.receive(Some(WAIT));
         assert!(cut.is_err(), "{cut:?}");
-        assert!(matches!(
-            sub.end(),
-            Some(coqui_agentic_peer::mux::StreamEnd::Refused(_))
-        ));
+        assert!(matches!(sub.end(), Some(StreamEnd::Refused(_))));
         drop(sub);
         let started = Instant::now();
         while world.agent.ended.load(Ordering::SeqCst) < 1 {

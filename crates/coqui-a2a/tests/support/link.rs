@@ -2,10 +2,9 @@
 //! the link's mux, with nothing mocked.
 #![allow(dead_code)]
 
-use std::cell::Cell;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -50,48 +49,16 @@ impl Setup {
     }
 }
 
-/// One test sets up links at a time. Thirteen proofs started within a millisecond of each other lose
-/// a connection about one run in seven on the machine this was written on, so the tests take turns.
-static TURN: Mutex<()> = Mutex::new(());
-
-thread_local! {
-    static HOLDING: Cell<bool> = const { Cell::new(false) };
-}
-
-/// A test's turn, held for as long as its hosts live. A thread that already has it keeps it.
-struct Turn(Option<MutexGuard<'static, ()>>);
-
-impl Turn {
-    fn take() -> Self {
-        if HOLDING.with(Cell::get) {
-            return Self(None);
-        }
-        let guard = TURN.lock().unwrap_or_else(PoisonError::into_inner);
-        HOLDING.with(|holding| holding.set(true));
-        Self(Some(guard))
-    }
-}
-
-impl Drop for Turn {
-    fn drop(&mut self) {
-        if self.0.is_some() {
-            HOLDING.with(|holding| holding.set(false));
-        }
-    }
-}
-
 /// The answering end: accepts connections, proves each peer, and serves its link.
 pub struct Host {
     pub address: SocketAddr,
     pub id: PeerId,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
-    _turn: Turn,
 }
 
 impl Host {
     pub fn start(setup: Setup) -> Self {
-        let turn = Turn::take();
         let id = setup.identity.peer_id();
         let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), None)
             .unwrap()
@@ -142,7 +109,6 @@ impl Host {
             id,
             stop,
             accept: Some(accept),
-            _turn: turn,
         }
     }
 
