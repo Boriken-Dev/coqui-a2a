@@ -29,7 +29,7 @@ use std::time::Instant;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequest as _, Request as HttpRequest, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method as Method_, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response as HttpResponse};
@@ -75,6 +75,9 @@ pub enum LoopbackError {
     TokenUndecided,
     /// The token is empty, or holds what a header cannot carry.
     BadToken,
+    /// A listed origin is not one a browser would send: a lower-case `http` or `https` scheme and a
+    /// host, an optional port and nothing else, which leaves out `*` and `null`.
+    BadOrigin(String),
     /// The port could not be bound or the runtime could not start.
     Io(std::io::Error),
 }
@@ -87,6 +90,7 @@ impl fmt::Display for LoopbackError {
                 f.write_str("the endpoint needs a token, or to be told to go without one")
             }
             Self::BadToken => f.write_str("a token is one or more visible ASCII characters"),
+            Self::BadOrigin(origin) => write!(f, "{origin:?} is not an origin a browser sends"),
             Self::Io(error) => write!(f, "the endpoint could not start: {error}"),
         }
     }
@@ -96,7 +100,7 @@ impl core::error::Error for LoopbackError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::NotLoopback | Self::TokenUndecided | Self::BadToken => None,
+            Self::NotLoopback | Self::TokenUndecided | Self::BadToken | Self::BadOrigin(_) => None,
         }
     }
 }
@@ -120,6 +124,7 @@ enum Token {
 pub struct Config {
     address: SocketAddr,
     origins: Vec<String>,
+    forwarded: Vec<String>,
     token: Token,
     max_body: usize,
     max_connections: usize,
@@ -135,6 +140,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("address", &self.address)
             .field("origins", &self.origins)
+            .field("forwarded", &self.forwarded)
             .field(
                 "token",
                 match &self.token {
@@ -167,6 +173,7 @@ impl Config {
         Ok(Self {
             address,
             origins: Vec::new(),
+            forwarded: Vec::new(),
             token: Token::Undecided,
             max_body: 1 << 20,
             max_connections: 64,
@@ -178,11 +185,19 @@ impl Config {
         })
     }
 
-    /// Lets requests from `origin` (such as `http://127.0.0.1:3000`) through. By default every
-    /// request that carries an `Origin` is refused.
+    /// Lets a page from `origin` (such as `http://127.0.0.1:3000`) use the endpoint, with the CORS
+    /// answers a browser asks for. By default every request that carries an `Origin` is refused.
     #[must_use]
     pub fn allow_origin(mut self, origin: impl Into<String>) -> Self {
         self.origins.push(origin.into());
+        self
+    }
+
+    /// Passes the header `name` to the agent as a service parameter, as well as `a2a-*` and
+    /// `Authorization`: for a credential whose scheme on the agent's card names another header.
+    #[must_use]
+    pub fn forward_header(mut self, name: impl AsRef<str>) -> Self {
+        self.forwarded.push(name.as_ref().to_ascii_lowercase());
         self
     }
 
@@ -712,6 +727,7 @@ impl fmt::Debug for Loopback {
 struct Shared {
     hub: Arc<Hub>,
     origins: Arc<Vec<String>>,
+    forwarded: Arc<Vec<String>>,
     token: Option<Arc<String>>,
     address: SocketAddr,
     request_timeout: Duration,
@@ -736,9 +752,13 @@ impl Loopback {
     ///
     /// # Errors
     ///
-    /// [`LoopbackError::TokenUndecided`] or [`LoopbackError::BadToken`] for the token, and
-    /// [`LoopbackError::Io`] when the port is taken or the runtime cannot start.
+    /// [`LoopbackError::TokenUndecided`] or [`LoopbackError::BadToken`] for the token,
+    /// [`LoopbackError::BadOrigin`] for a listed origin, and [`LoopbackError::Io`] when the port is
+    /// taken or the runtime cannot start.
     pub fn start(config: Config, hub: Arc<Hub>) -> Result<Self, LoopbackError> {
+        if let Some(origin) = config.origins.iter().find(|origin| !valid_origin(origin)) {
+            return Err(LoopbackError::BadOrigin(origin.clone()));
+        }
         let token = match config.token {
             Token::Undecided => return Err(LoopbackError::TokenUndecided),
             Token::Required(token)
@@ -759,6 +779,7 @@ impl Loopback {
         let state = Shared {
             hub,
             origins: Arc::new(config.origins),
+            forwarded: Arc::new(config.forwarded),
             token,
             address,
             request_timeout: config.request_timeout,
@@ -959,23 +980,25 @@ fn plain(status: StatusCode, text: &'static str) -> HttpResponse {
     (status, text).into_response()
 }
 
-/// Refuses what a web page or a rebinding attack would send, before anything else looks at it.
+/// Refuses what a web page or a rebinding attack would send, before anything else looks at it, and
+/// gives a page from a listed origin the answers its browser needs.
 async fn guard(State(state): State<Shared>, request: HttpRequest, next: Next) -> HttpResponse {
     let headers = request.headers();
-    match headers.get(header::ORIGIN) {
+    let origin = match headers.get(header::ORIGIN) {
         Some(origin) => {
-            let allowed = origin
+            let listed = origin
                 .to_str()
                 .is_ok_and(|origin| state.origins.iter().any(|allowed| allowed == origin));
-            if !allowed {
+            if !listed {
                 return plain(StatusCode::FORBIDDEN, "an Origin is not accepted here");
             }
+            Some(origin.clone())
         }
         None if from_a_page(headers) => {
             return plain(StatusCode::FORBIDDEN, "a web page is not accepted here");
         }
-        None => {}
-    }
+        None => None,
+    };
     let host_ok = headers
         .get(header::HOST)
         .and_then(|host| host.to_str().ok())
@@ -983,17 +1006,69 @@ async fn guard(State(state): State<Shared>, request: HttpRequest, next: Next) ->
     if !host_ok {
         return plain(StatusCode::FORBIDDEN, "the Host is not a loopback name");
     }
-    if let Some(token) = &state.token
-        && !shows_token(headers, token)
+    // A browser's preflight holds no credential, so it comes before the token, and reaches no link.
+    if let Some(origin) = &origin
+        && request.method() == Method_::OPTIONS
+        && headers.contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
     {
-        return (
+        return preflight(headers, origin);
+    }
+    let authorized = state
+        .token
+        .as_ref()
+        .is_none_or(|token| shows_token(headers, token));
+    let mut response = if authorized {
+        next.run(request).await
+    } else {
+        (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
             "a bearer token is required",
         )
-            .into_response();
+            .into_response()
+    };
+    if let Some(origin) = origin {
+        let answer = response.headers_mut();
+        answer.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        answer.insert(header::VARY, HeaderValue::from_static("Origin"));
     }
-    next.run(request).await
+    response
+}
+
+/// The answer to a listed origin's preflight. It may send whatever headers it asks to: it is listed.
+fn preflight(headers: &HeaderMap, origin: &HeaderValue) -> HttpResponse {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let answer = response.headers_mut();
+    answer.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+    answer.insert(header::VARY, HeaderValue::from_static("Origin"));
+    answer.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST"),
+    );
+    if let Some(asked) = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+        answer.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+    }
+    // What a browser asks of a public page reaching a loopback address.
+    if headers.contains_key("access-control-request-private-network") {
+        answer.insert(
+            "access-control-allow-private-network",
+            HeaderValue::from_static("true"),
+        );
+    }
+    response
+}
+
+/// Whether a browser could send `origin`: what `Origin` compares with is exact, so anything else here
+/// is a setting that never matches, or in the case of `*` and `null` one that should not.
+fn valid_origin(origin: &str) -> bool {
+    let Some((scheme, host)) = origin.split_once("://") else {
+        return false;
+    };
+    matches!(scheme, "http" | "https")
+        && !host.is_empty()
+        && host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-:[]".contains(&byte)
+        })
 }
 
 /// Whether the request holds one `Authorization` header, of the scheme `Bearer`, with `token`. A byte
@@ -1043,23 +1118,34 @@ fn host_is_loopback(host: &str, port: u16) -> bool {
     literal.parse::<IpAddr>().is_ok_and(is_loopback)
 }
 
-/// The service parameters a request's headers give: `a2a-*`, and `authorization` unless this
-/// endpoint spent it.
-fn parameters_of(
-    headers: &HeaderMap,
-    spent_authorization: bool,
-) -> Result<ServiceParameters, A2aError> {
+/// The service parameters a request's headers give: `a2a-*`, those named to be forwarded, and
+/// `authorization` unless this endpoint spent it. Several values for a name are one list to HTTP, and
+/// the binding says the same, so a later one does not quietly stand in for the first.
+fn parameters_of(state: &Shared, headers: &HeaderMap) -> Result<ServiceParameters, A2aError> {
     let mut parameters = ServiceParameters::new();
-    for (name, value) in headers {
+    for name in headers.keys() {
         let name = name.as_str();
-        let wanted = name.starts_with("a2a-") || (name == "authorization" && !spent_authorization);
+        let wanted = if name == "authorization" {
+            state.token.is_none()
+        } else {
+            name.starts_with("a2a-") || state.forwarded.iter().any(|named| named == name)
+        };
         if !wanted {
             continue;
         }
-        let value = value
-            .to_str()
-            .map_err(|_| A2aError::new(ErrorKind::InvalidRequest, "a header is not text"))?;
-        parameters.set(name, value)?;
+        let mut joined = String::new();
+        for value in headers.get_all(name) {
+            let value = value
+                .to_str()
+                .map_err(|_| A2aError::new(ErrorKind::InvalidRequest, "a header is not text"))?;
+            if !joined.is_empty() {
+                joined.push_str(", ");
+            }
+            joined.push_str(value);
+        }
+        parameters
+            .set(name, &joined)
+            .map_err(|error| A2aError::new(ErrorKind::InvalidRequest, error.message))?;
     }
     Ok(parameters)
 }
@@ -1178,7 +1264,7 @@ async fn rpc(
             A2aError::new(ErrorKind::InvalidRequest, "not a JSON-RPC 2.0 request"),
         );
     }
-    let parameters = match parameters_of(&headers, state.token.is_some()) {
+    let parameters = match parameters_of(&state, &headers) {
         Ok(parameters) => parameters,
         Err(error) => return rpc_error(StatusCode::OK, &id, error),
     };
@@ -1283,7 +1369,7 @@ fn down(id: &Value) -> HttpResponse {
 /// while for as long as the link lasts, unless what it was asked with could be a credential: then it may
 /// differ per caller, and it is not for the next one.
 async fn card(State(state): State<Shared>, headers: HeaderMap) -> HttpResponse {
-    let parameters = match parameters_of(&headers, state.token.is_some()) {
+    let parameters = match parameters_of(&state, &headers) {
         Ok(parameters) => parameters,
         Err(error) => return rpc_error(StatusCode::BAD_REQUEST, &Value::Null, error),
     };

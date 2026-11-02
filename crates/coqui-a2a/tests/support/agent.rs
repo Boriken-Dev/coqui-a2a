@@ -31,6 +31,8 @@ pub struct Echo {
     pub produced: Arc<AtomicUsize>,
     /// Times the card was asked for, which is once for every operation that reaches this agent.
     pub cards: Arc<AtomicUsize>,
+    /// The service parameters of the last `SendMessage`.
+    pub parameters: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl Echo {
@@ -218,6 +220,14 @@ impl Agent for Echo {
         caller: &Caller<'_>,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2aError> {
+        *self
+            .parameters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = caller
+            .service_parameters
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
         if request.message.joined_text() == "wait" {
             while caller.is_open() {
                 thread::sleep(Duration::from_millis(20));

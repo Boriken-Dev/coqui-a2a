@@ -71,9 +71,18 @@ struct Loopback_ {
     /// This side's identity file. Defaults to this user's.
     #[arg(long)]
     identity: Option<PathBuf>,
-    /// Lets requests from this Origin through; by default any request with an Origin is refused.
+    /// Lets a page from this Origin use the endpoint, repeatable; by default any request with an
+    /// Origin is refused.
     #[arg(long = "allow-origin")]
     origins: Vec<String>,
+    /// Passes this header to the agent as a service parameter, repeatable: for a credential the
+    /// agent's card names in a header other than Authorization.
+    #[arg(long = "forward-header", value_name = "NAME")]
+    forwarded: Vec<String>,
+    /// How long the agent has to say anything to an operation. SendMessage waits for the task to
+    /// settle, so a longer task needs more, or returnImmediately and GetTask.
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    answer_timeout: u64,
     /// A PEM bundle of roots that must vouch for a wss:// link's certificate. Without it the
     /// certificate is not checked and the in-band proof alone decides who the peer is.
     #[arg(long)]
@@ -107,6 +116,10 @@ fn loopback(args: &Loopback_) -> Result<(), String> {
     for origin in &args.origins {
         config = config.allow_origin(origin.clone());
     }
+    for name in &args.forwarded {
+        config = config.forward_header(name);
+    }
+    config = config.with_answer_timeout(Duration::from_secs(args.answer_timeout));
     let token_file = if args.no_token {
         config = config.without_token();
         None

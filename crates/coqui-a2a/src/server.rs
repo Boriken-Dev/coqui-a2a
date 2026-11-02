@@ -364,15 +364,21 @@ fn send_request(params: Value) -> Result<SendMessageRequest, A2aError> {
 }
 
 /// The major version in `a2a-version` has to be 1; no value means the client has no preference.
+/// Headers joined into one value by a relay all count: a version the agent cannot speak is not hidden
+/// by another beside it.
 fn check_version(parameters: &crate::wire::ServiceParameters) -> Result<(), A2aError> {
-    let Some(version) = parameters.get("a2a-version") else {
+    let Some(versions) = parameters.get("a2a-version") else {
         return Ok(());
     };
-    let major = version
-        .split('.')
-        .next()
-        .and_then(|major| major.parse::<u32>().ok());
-    if major == Some(1) {
+    let major_one = |version: &str| {
+        version
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+            == Some(1)
+    };
+    if versions.split(',').all(major_one) {
         Ok(())
     } else {
         Err(A2aError::new(

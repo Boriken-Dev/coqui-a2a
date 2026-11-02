@@ -362,3 +362,34 @@ fn a_peer_the_link_cannot_prove_ends_the_command_with_a_failure() {
     };
     assert_eq!(status.code(), Some(1));
 }
+
+#[test]
+fn the_flags_of_the_relay_reach_it() {
+    let scratch = Scratch::new("flags");
+    let host = host_for(&scratch.0.join("client.pem"));
+
+    // An origin no browser sends is a mistake to say at once.
+    let output = command(&scratch, &host)
+        .args(["--no-token", "--allow-origin", "*"])
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("origin"));
+
+    let mut relay = command(&scratch, &host);
+    relay.args(["--no-token", "--allow-origin", "http://127.0.0.1:3000"]);
+    relay.args(["--answer-timeout", "1"]);
+    let (_running, endpoint, _) = started(relay);
+    assert_eq!(answered(&endpoint, "").0, 200);
+    let listed = "Origin: http://127.0.0.1:3000\r\n";
+    assert_eq!(http_post(&endpoint, listed, REQUEST).0, 200);
+    // The agent does not answer this until the client goes, so only the flag's second ends it.
+    let waited = Instant::now();
+    let wait = REQUEST.replace("via the command", "wait");
+    let (status, body) = http_post(&endpoint, "", &wait);
+    assert_eq!(status, 200);
+    assert!(body.contains("-32603"), "{body}");
+    assert!(waited.elapsed() < WAIT, "{:?}", waited.elapsed());
+}

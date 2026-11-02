@@ -1112,3 +1112,221 @@ fn a_card_with_no_capabilities_still_says_no_webhooks_and_what_is_no_card_is_an_
         );
     }
 }
+
+#[test]
+fn a_header_sent_twice_is_one_list_and_a_version_cannot_hide_behind_another() {
+    with_echo(
+        |config| config,
+        |endpoint| {
+            let send = rpc("1", "SendMessage", &message("hello"));
+            let reply = post(
+                endpoint.address,
+                "A2A-Extensions: urn:one\r\nA2A-Extensions: urn:two\r\nA2A-Custom: only\r\n",
+                &send,
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            {
+                let seen = endpoint.agent.parameters.lock().unwrap();
+                assert_eq!(seen["a2a-extensions"], "urn:one, urn:two");
+                assert_eq!(seen["a2a-custom"], "only");
+            }
+            for versions in [
+                "A2A-Version: 0.3\r\nA2A-Version: 1.0\r\n",
+                "A2A-Version: 1.0\r\nA2A-Version: 0.3\r\n",
+                "A2A-Version: 1.0, 2.0\r\n",
+            ] {
+                let reply = post(endpoint.address, versions, &send);
+                assert_eq!(reply.json()["error"]["code"], -32009, "{versions}");
+            }
+            let same_major = "A2A-Version: 1.0\r\nA2A-Version: 1.1\r\n";
+            assert!(
+                post(endpoint.address, same_major, &send)
+                    .json()
+                    .get("result")
+                    .is_some()
+            );
+
+            // Past the bounds, joined or not, is the request's fault.
+            let long = format!(
+                "A2A-Custom: {}\r\nA2A-Custom: {}\r\n",
+                "a".repeat(5000),
+                "a".repeat(5000)
+            );
+            assert_eq!(
+                post(endpoint.address, &long, &send).json()["error"]["code"],
+                -32600
+            );
+            let many: String = (0..40).map(|at| format!("A2A-N{at}: x\r\n")).collect();
+            assert_eq!(
+                post(endpoint.address, &many, &send).json()["error"]["code"],
+                -32600
+            );
+        },
+    );
+}
+
+#[test]
+fn only_a_header_named_is_forwarded_and_the_spent_token_never_is() {
+    let send = rpc("1", "SendMessage", &message("hello"));
+    let with_key = "X-Api-Key: k\r\nX-Other: o\r\n";
+    with_echo(
+        |config| config.forward_header("X-Api-Key").with_token("s3cret"),
+        |endpoint| {
+            let extra = format!("Authorization: Bearer s3cret\r\n{with_key}");
+            assert_eq!(post(endpoint.address, &extra, &send).status, 200);
+            let seen = endpoint.agent.parameters.lock().unwrap();
+            assert_eq!(seen.get("x-api-key").map(String::as_str), Some("k"));
+            assert!(!seen.contains_key("x-other"));
+            assert!(
+                !seen.contains_key("authorization"),
+                "the token was forwarded"
+            );
+        },
+    );
+    // Naming it does not undo that the token is this endpoint's.
+    with_echo(
+        |config| config.forward_header("Authorization").with_token("s3cret"),
+        |endpoint| {
+            let extra = "Authorization: Bearer s3cret\r\n";
+            assert_eq!(post(endpoint.address, extra, &send).status, 200);
+            let seen = endpoint.agent.parameters.lock().unwrap();
+            assert!(
+                !seen.contains_key("authorization"),
+                "the token was forwarded"
+            );
+        },
+    );
+    // With no token here, it is the agent's own.
+    with_echo(
+        |config| config,
+        |endpoint| {
+            let extra = format!("Authorization: Bearer agent\r\n{with_key}");
+            assert_eq!(post(endpoint.address, &extra, &send).status, 200);
+            let seen = endpoint.agent.parameters.lock().unwrap();
+            assert_eq!(
+                seen.get("authorization").map(String::as_str),
+                Some("Bearer agent")
+            );
+            assert!(!seen.contains_key("x-api-key"));
+        },
+    );
+}
+
+#[test]
+fn a_page_from_a_listed_origin_gets_what_its_browser_asks_for() {
+    let page = "http://127.0.0.1:3000";
+    with_echo(
+        |config| config.allow_origin(page).with_token("s3cret"),
+        |endpoint| {
+            let address = endpoint.address;
+            // A preflight holds no credential, and reaches nothing past this endpoint.
+            let preflight = |origin: &str| {
+                http(
+                    address,
+                    &format!(
+                        "OPTIONS / HTTP/1.0\r\nHost: {address}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: authorization, content-type, a2a-version\r\nAccess-Control-Request-Private-Network: true\r\n\r\n"
+                    ),
+                    b"",
+                )
+            };
+            let allowed = preflight(page);
+            assert_eq!(allowed.status, 204, "{}", allowed.headers);
+            for line in [
+                "access-control-allow-origin: http://127.0.0.1:3000",
+                "access-control-allow-methods: get, post",
+                "access-control-allow-headers: authorization, content-type, a2a-version",
+                "access-control-allow-private-network: true",
+                "vary: origin",
+            ] {
+                assert!(
+                    allowed.headers.contains(line),
+                    "{line}: {}",
+                    allowed.headers
+                );
+            }
+            assert_eq!(endpoint.agent.cards.load(Ordering::SeqCst), 0);
+
+            let other = preflight("http://127.0.0.1:3001");
+            assert_eq!(other.status, 403);
+            assert!(!other.headers.contains("access-control-allow"));
+
+            // Every answer it can read says it may, a refusal included, so a page can tell what happened.
+            let origin = format!(
+                "Origin: {page}\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n"
+            );
+            let body = rpc("1", "GetTask", &json!({ "id": "x" }));
+            let refused = post(address, &origin, &body);
+            assert_eq!(refused.status, 401);
+            assert!(
+                refused
+                    .headers
+                    .contains("access-control-allow-origin: http://127.0.0.1:3000")
+            );
+            let with_token = format!("{origin}Authorization: Bearer s3cret\r\n");
+            let served = post(address, &with_token, &body);
+            assert_eq!(served.status, 200);
+            assert!(
+                served
+                    .headers
+                    .contains("access-control-allow-origin: http://127.0.0.1:3000")
+            );
+            assert!(served.headers.contains("vary: origin"));
+            let streamed = post(
+                address,
+                &with_token,
+                &rpc("1", "SendStreamingMessage", &message("x")),
+            );
+            assert!(streamed.headers.contains("text/event-stream"));
+            assert!(
+                streamed
+                    .headers
+                    .contains("access-control-allow-origin: http://127.0.0.1:3000")
+            );
+
+            // A client with no Origin is told nothing of CORS.
+            let plain = post(address, "Authorization: Bearer s3cret\r\n", &body);
+            assert!(!plain.headers.contains("access-control-allow"));
+        },
+    );
+}
+
+#[test]
+fn an_origin_no_browser_sends_stops_the_endpoint_from_starting() {
+    let config = || {
+        Config::new("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .without_token()
+    };
+    for bad in [
+        "*",
+        "null",
+        "",
+        "example.com",
+        "http://",
+        "ftp://example.com",
+        "HTTP://example.com",
+        "http://Example.com",
+        "http://example.com/",
+        "http://example.com/path",
+        "http://example.com?x",
+        "http://user@example.com",
+        "http://exa mple.com",
+    ] {
+        let refused = Loopback::start(config().allow_origin(bad), Hub::new());
+        assert!(
+            matches!(refused, Err(LoopbackError::BadOrigin(_))),
+            "{bad:?}"
+        );
+    }
+    for good in [
+        "http://127.0.0.1:3000",
+        "https://example.com",
+        "http://[::1]:3000",
+        "http://localhost:8080",
+    ] {
+        assert!(
+            Loopback::start(config().allow_origin(good), Hub::new()).is_ok(),
+            "{good}"
+        );
+    }
+}
