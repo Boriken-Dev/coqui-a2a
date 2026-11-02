@@ -59,8 +59,10 @@ fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
         "futures-util",
         "hyper",
         "hyper-util",
+        "subtle",
         // The command line only.
         "clap",
+        "coqui-peer",
         "coqui-peer-webcrypto",
         "coqui-peer-tls",
         "rustls",

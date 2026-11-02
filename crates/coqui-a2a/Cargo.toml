@@ -16,9 +16,9 @@ publish = false
 
 [features]
 # The HTTP JSON-RPC endpoint on a loopback address, for A2A software that knows nothing of links.
-loopback = ["dep:axum", "dep:tokio", "dep:futures-util", "dep:hyper", "dep:hyper-util", "serde_json/raw_value"]
+loopback = ["dep:axum", "dep:tokio", "dep:futures-util", "dep:hyper", "dep:hyper-util", "dep:subtle", "serde_json/raw_value"]
 # The `coqui-a2a` command.
-cli = ["loopback", "dep:clap", "dep:coqui-peer-webcrypto", "dep:coqui-peer-tls", "dep:rustls", "dep:url", "coqui-web/websocket"]
+cli = ["loopback", "dep:clap", "dep:coqui-peer", "dep:coqui-peer-webcrypto", "dep:coqui-peer-tls", "dep:rustls", "dep:url", "coqui-web/websocket"]
 
 [[bin]]
 name = "coqui-a2a"
@@ -38,8 +38,12 @@ futures-util = { version = "0.3", default-features = false, optional = true }
 # The server underneath axum, for what axum::serve does not expose: a timeout and a cap per connection.
 hyper = { version = "1", default-features = false, features = ["http1", "server"], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"], optional = true }
+# The bearer token's comparison.
+subtle = { version = "2.6", default-features = false, optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", optional = true }
+# Writing the token file so that two starts at once agree on one token.
+coqui-peer = { version = "=0.0.0-alpha.1", optional = true }
 # The TLS configuration for a wss:// link; the in-band proof, not TLS, decides who the peer is.
 coqui-peer-tls = { version = "=0.0.0-alpha.1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }

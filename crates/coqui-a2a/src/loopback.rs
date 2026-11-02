@@ -37,6 +37,7 @@ use axum::routing::{get, post};
 use coqui_agentic_peer::mux::{CloseReason, LinkState, Mux};
 use coqui_web::{Channel, Failure};
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
@@ -70,6 +71,10 @@ const BUSY: &[u8] =
 pub enum LoopbackError {
     /// The address is not a loopback address.
     NotLoopback,
+    /// Neither [`Config::with_token`] nor [`Config::without_token`] was called.
+    TokenUndecided,
+    /// The token is empty, or holds what a header cannot carry.
+    BadToken,
     /// The port could not be bound or the runtime could not start.
     Io(std::io::Error),
 }
@@ -78,6 +83,10 @@ impl fmt::Display for LoopbackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotLoopback => f.write_str("the endpoint listens on a loopback address only"),
+            Self::TokenUndecided => {
+                f.write_str("the endpoint needs a token, or to be told to go without one")
+            }
+            Self::BadToken => f.write_str("a token is one or more visible ASCII characters"),
             Self::Io(error) => write!(f, "the endpoint could not start: {error}"),
         }
     }
@@ -87,7 +96,7 @@ impl core::error::Error for LoopbackError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::NotLoopback => None,
+            Self::NotLoopback | Self::TokenUndecided | Self::BadToken => None,
         }
     }
 }
@@ -98,12 +107,20 @@ impl From<std::io::Error> for LoopbackError {
     }
 }
 
+/// What a request has to show.
+#[derive(Clone)]
+enum Token {
+    Undecided,
+    Required(String),
+    None,
+}
+
 /// Settings of the endpoint.
 #[derive(Clone)]
 pub struct Config {
     address: SocketAddr,
     origins: Vec<String>,
-    token: Option<String>,
+    token: Token,
     max_body: usize,
     max_connections: usize,
     request_timeout: Duration,
@@ -118,7 +135,14 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("address", &self.address)
             .field("origins", &self.origins)
-            .field("token", &self.token.as_ref().map(|_| "set"))
+            .field(
+                "token",
+                match &self.token {
+                    Token::Undecided => &"undecided",
+                    Token::Required(_) => &"set",
+                    Token::None => &"none",
+                },
+            )
             .field("max_body", &self.max_body)
             .field("max_connections", &self.max_connections)
             .field("request_timeout", &self.request_timeout)
@@ -143,7 +167,7 @@ impl Config {
         Ok(Self {
             address,
             origins: Vec::new(),
-            token: None,
+            token: Token::Undecided,
             max_body: 1 << 20,
             max_connections: 64,
             request_timeout: Duration::from_secs(10),
@@ -163,10 +187,19 @@ impl Config {
     }
 
     /// Requires `Authorization: Bearer <token>` of every request, and does not forward that header
-    /// to the agent. Without it, every program of every user on this machine can use the link.
+    /// to the agent. [`Loopback::start`] refuses an endpoint until this or
+    /// [`Config::without_token`] was called.
     #[must_use]
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.token = Token::Required(token.into());
+        self
+    }
+
+    /// Serves every request with no token: every program of every user on this machine can then do
+    /// what the link's peer granted, and read the extended card. `Authorization` goes to the agent.
+    #[must_use]
+    pub fn without_token(mut self) -> Self {
+        self.token = Token::None;
         self
     }
 
@@ -703,8 +736,19 @@ impl Loopback {
     ///
     /// # Errors
     ///
+    /// [`LoopbackError::TokenUndecided`] or [`LoopbackError::BadToken`] for the token, and
     /// [`LoopbackError::Io`] when the port is taken or the runtime cannot start.
     pub fn start(config: Config, hub: Arc<Hub>) -> Result<Self, LoopbackError> {
+        let token = match config.token {
+            Token::Undecided => return Err(LoopbackError::TokenUndecided),
+            Token::Required(token)
+                if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) =>
+            {
+                return Err(LoopbackError::BadToken);
+            }
+            Token::Required(token) => Some(Arc::new(token)),
+            Token::None => None,
+        };
         let listener = TcpListener::bind(config.address)?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
@@ -715,7 +759,7 @@ impl Loopback {
         let state = Shared {
             hub,
             origins: Arc::new(config.origins),
-            token: config.token.map(Arc::new),
+            token,
             address,
             request_timeout: config.request_timeout,
             answer_timeout: config.answer_timeout,
@@ -939,16 +983,33 @@ async fn guard(State(state): State<Shared>, request: HttpRequest, next: Next) ->
     if !host_ok {
         return plain(StatusCode::FORBIDDEN, "the Host is not a loopback name");
     }
-    if let Some(token) = &state.token {
-        let given = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if given != Some(token.as_str()) {
-            return plain(StatusCode::UNAUTHORIZED, "a bearer token is required");
-        }
+    if let Some(token) = &state.token
+        && !shows_token(headers, token)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "a bearer token is required",
+        )
+            .into_response();
     }
     next.run(request).await
+}
+
+/// Whether the request holds one `Authorization` header, of the scheme `Bearer`, with `token`. A byte
+/// that differs takes as long to find as any other; the length of a token is not a secret.
+fn shows_token(headers: &HeaderMap, token: &str) -> bool {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        return false;
+    };
+    let Some((scheme, given)) = value.as_bytes().split_at_checked(6) else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case(b"Bearer")
+        && given
+            .strip_prefix(b" ")
+            .is_some_and(|given| bool::from(given.ct_eq(token.as_bytes())))
 }
 
 /// Whether a browser sent this for a page, as a page's GET does with no `Origin`: `<img src>`, a
@@ -1602,7 +1663,7 @@ mod tests {
     fn a_card_lasts_as_long_as_its_link_and_a_links_end_is_only_its_own() {
         let hub = Hub::new();
         let config = Config::new("127.0.0.1:0".parse().unwrap()).unwrap();
-        let endpoint = Loopback::start(config, Arc::clone(&hub)).unwrap();
+        let endpoint = Loopback::start(config.without_token(), Arc::clone(&hub)).unwrap();
         let address = endpoint.local_addr();
         let (first, second, third) = (
             CardPeer::new("first"),

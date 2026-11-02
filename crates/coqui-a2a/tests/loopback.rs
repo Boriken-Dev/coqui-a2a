@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_a2a::loopback::{Config, Hub, Loopback};
+use coqui_a2a::loopback::{Config, Hub, Loopback, LoopbackError};
 use coqui_a2a::{PROTOCOL, Server};
 use coqui_agentic_peer::link::Services;
 use coqui_agentic_peer::mux::LinkStream;
@@ -145,7 +145,11 @@ fn with_services(
     ));
     let hub = Hub::new();
     let endpoint = Loopback::start(
-        config(Config::new("127.0.0.1:0".parse().unwrap()).unwrap()),
+        config(
+            Config::new("127.0.0.1:0".parse().unwrap())
+                .unwrap()
+                .without_token(),
+        ),
         Arc::clone(&hub),
     )
     .unwrap();
@@ -528,26 +532,68 @@ fn only_json_and_only_post_and_only_a_bounded_body() {
 }
 
 #[test]
-fn a_bearer_token_can_be_required_of_every_request() {
+fn an_endpoint_does_not_start_until_its_token_is_decided() {
+    let config = || Config::new("127.0.0.1:0".parse().unwrap()).unwrap();
+    let refused = Loopback::start(config(), Hub::new());
+    assert!(matches!(refused, Err(LoopbackError::TokenUndecided)));
+    for token in [
+        "",
+        " ",
+        "\t",
+        "two words",
+        "line\nbreak",
+        "caf\u{e9}",
+        " padded",
+    ] {
+        let refused = Loopback::start(config().with_token(token), Hub::new());
+        assert!(matches!(refused, Err(LoopbackError::BadToken)), "{token:?}");
+    }
+    assert!(Loopback::start(config().with_token("s3cret"), Hub::new()).is_ok());
+    assert!(Loopback::start(config().without_token(), Hub::new()).is_ok());
+}
+
+#[test]
+fn a_bearer_token_is_required_of_every_request_exactly() {
     with_endpoint(
         |config| config.with_token("s3cret"),
         |address| {
             let body = rpc("1", "GetTask", &json!({ "id": "x" }));
             assert_eq!(post(address, "", &body).status, 401);
-            assert_eq!(
-                post(address, "Authorization: Bearer wrong\r\n", &body).status,
-                401
+            assert!(
+                post(address, "", &body)
+                    .headers
+                    .contains("www-authenticate: bearer")
             );
+            for wrong in [
+                "Authorization: Bearer wrong\r\n",
+                "Authorization: Bearer s3cre\r\n",
+                "Authorization: Bearer s3cretx\r\n",
+                "Authorization: Bearer S3CRET\r\n",
+                "Authorization: Bearer  s3cret\r\n",
+                "Authorization: Bearer\r\n",
+                "Authorization: Bearer \r\n",
+                "Authorization: Basic s3cret\r\n",
+                "Authorization: s3cret\r\n",
+                "Authorization: Bearer caf\u{e9}\r\n",
+                "Authorization: Bearer s3cret\r\nAuthorization: Bearer wrong\r\n",
+                "Authorization: Bearer wrong\r\nAuthorization: Bearer s3cret\r\n",
+            ] {
+                assert_eq!(post(address, wrong, &body).status, 401, "{wrong}");
+            }
+            for right in [
+                "Authorization: Bearer s3cret\r\n",
+                "authorization: bearer s3cret\r\n",
+                "AUTHORIZATION: BEARER s3cret\r\n",
+            ] {
+                assert_eq!(post(address, right, &body).status, 200, "{right}");
+            }
+            assert_eq!(get_card(address, "").status, 401);
             assert_eq!(
-                post(address, "Authorization: Bearer s3cret\r\n", &body).status,
+                get_card(address, "Authorization: Bearer s3cret\r\n").status,
                 200
             );
-            let card = http(
-                address,
-                &format!("GET /.well-known/agent-card.json HTTP/1.0\r\nHost: {address}\r\n\r\n"),
-                b"",
-            );
-            assert_eq!(card.status, 401);
+            let extended = rpc("1", "GetExtendedAgentCard", &json!({}));
+            assert_eq!(post(address, "", &extended).status, 401);
         },
     );
 }
@@ -565,8 +611,13 @@ fn an_address_that_is_not_loopback_is_refused() {
 #[test]
 fn with_no_link_attached_every_operation_says_so() {
     let hub = Hub::new();
-    let endpoint =
-        Loopback::start(Config::new("127.0.0.1:0".parse().unwrap()).unwrap(), hub).unwrap();
+    let endpoint = Loopback::start(
+        Config::new("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .without_token(),
+        hub,
+    )
+    .unwrap();
     let address = endpoint.local_addr();
     let reply = post(address, "", &rpc("1", "SendMessage", &message("hello")));
     assert_eq!(reply.status, 503);
