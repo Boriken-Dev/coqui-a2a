@@ -1725,10 +1725,20 @@ mod tests {
 
     #[test]
     fn a_stream_the_peer_opens_is_refused_and_holds_nothing() {
+        // Closes the hub when the test ends, a failing assertion included, so the scope can end.
+        struct Closing<'a>(&'a Hub);
+
+        impl Drop for Closing<'_> {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+
         let opener = Opener::default();
         let hub = Hub::new();
         Mux::run(&opener, Side::Dialed, Limits::default(), None, |mux| {
             thread::scope(|scope| {
+                let _closing = Closing(&hub);
                 scope.spawn(|| hub.attach(mux));
                 let until = Instant::now() + Duration::from_secs(10);
                 let refused = |answer: &Vec<u8>| {
@@ -1748,7 +1758,6 @@ mod tests {
                     );
                     thread::sleep(Duration::from_millis(5));
                 }
-                hub.close();
             });
         });
     }
@@ -1832,7 +1841,12 @@ mod tests {
     }
 
     fn attached(hub: &Hub, link: u64) {
+        let until = Instant::now() + Duration::from_secs(10);
         while hub.link() != Some(link) {
+            assert!(
+                Instant::now() < until,
+                "link {link} is not the one attached"
+            );
             thread::sleep(Duration::from_millis(1));
         }
     }
