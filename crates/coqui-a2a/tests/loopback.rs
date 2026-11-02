@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coqui_a2a::loopback::{Config, Hub, Loopback};
 use coqui_a2a::{PROTOCOL, Server};
@@ -111,6 +111,12 @@ fn with_endpoint(config: impl FnOnce(Config) -> Config, body: impl FnOnce(Socket
         thread::scope(|scope| {
             let _closes = CloseHub(Arc::clone(&hub));
             scope.spawn(|| hub.attach(mux));
+            // Until then the endpoint rightly answers that it has no link, which a busy machine shows.
+            let until = Instant::now() + WAIT;
+            while !hub.is_up() {
+                assert!(Instant::now() < until, "the link never attached");
+                thread::sleep(Duration::from_millis(5));
+            }
             body(endpoint.local_addr());
         });
     });
