@@ -239,6 +239,8 @@ impl Request {
     ///
     /// [`ErrorKind::ParseError`] for bytes that are not JSON, and [`ErrorKind::InvalidRequest`] for
     /// JSON that is not a request. The error carries no part of the input.
+    // Over the lint's limit only when another crate turns on serde_json's `preserve_order`, and this is the rare path.
+    #[allow(clippy::result_large_err)]
     pub fn decode(bytes: &[u8]) -> Result<Self, (Value, A2aError)> {
         let value: Value = serde_json::from_slice(bytes)
             .map_err(|_| (Value::Null, A2aError::standard(ErrorKind::ParseError)))?;
