@@ -174,7 +174,7 @@ pub enum LoopbackError { NotLoopback, TokenUndecided, BadToken, BadOrigin(String
 
 ## Command line
 
-`coqui-a2a loopback --url <link> (--peer <id>... | --any-paired-peer) [--listen <loopback addr>] [--identity <file>] [--allow-origin <origin>]... [--forward-header <name>]... [--token-file <file> | --no-token] [--answer-timeout <seconds>] [--ca-file <pem>]`. Prints `http://<addr>/` on standard output and, unless `--no-token`, the token file's path on the next line, then redials with backoff when the link ends. The token file defaults to `a2a-loopback.token` in this user's directory, made the first time. A token file that is empty, past 4 KiB, not a file, holds more than visible ASCII, or on Unix can be reached by group or others stops the command. Exit 0 stopped, 1 failed, 2 usage.
+`coqui-a2a loopback --url <link> (--peer <id>... | --any-paired-peer) [--listen <loopback addr>] [--identity <file>] [--allow-origin <origin>]... [--forward-header <name>]... [--token-file <file> | --no-token] [--answer-timeout <seconds>] [--ca-file <pem>]`. Prints `http://<addr>/` on standard output and, unless `--no-token`, the token file's path on the next line, then redials with backoff when the link ends. It proves by the identity's method, Noise or WebCrypto; a new identity is Noise's. The token file defaults to `a2a-loopback.token` in this user's directory, made the first time. A token file that is empty, past 4 KiB, not a file, holds more than visible ASCII, or on Unix can be reached by group or others stops the command. Exit 0 stopped, 1 failed, 2 usage.
 
 ## Environment variables
 

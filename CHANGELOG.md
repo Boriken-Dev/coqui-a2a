@@ -15,3 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `ErrorKind::ALL`: every A2A error type with its code, `ErrorInfo` reason and domain, walked by a test and compared with the table in the binding page.
 - `loopback` and `coqui-a2a loopback`: a standard HTTP JSON-RPC and Server-Sent Events endpoint on a loopback address that translates to a link and serves the card at `/.well-known/agent-card.json`. It refuses a non-loopback bind, any `Origin` not listed, what a browser marks as coming from a page, and any `Host` that is not a loopback name. Every request shows a bearer token unless `--no-token` says otherwise, and `--peer` is required unless `--any-paired-peer` says otherwise. Connections, unfinished requests, stalled clients, answers waiting and the time an agent takes to answer are all bounded.
 - `vectors/binding.json` and `scripts/sdk-check.mjs`, which runs `@a2a-js/sdk` 1.3.0 through the command.
+- `coqui-a2a loopback` proves by its identity's method, Noise or WebCrypto, which coqui-agentic-peer keeps with the identity; a new identity is Noise's.
+
+### Changed
+
+- coqui-agentic-peer is pinned at `9b1fee4`, which proves by Noise or WebCrypto, and coqui-web at `445007a`, the revision it pins.

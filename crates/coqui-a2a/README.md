@@ -93,7 +93,7 @@ coqui-a2a loopback --url ws://127.0.0.1:9000/link --peer sha256:<the agent's pee
 | `--listen` | `COQUI_A2A_LISTEN` | a loopback address, default `127.0.0.1:0`; anything else is refused |
 | `--peer` | | the remote peer's id, pinned; required unless `--any-paired-peer` is given |
 | `--any-paired-peer` | | accepts every peer paired in this user's trust store as the agent |
-| `--identity` | | this side's key file; defaults to this user's |
+| `--identity` | | this side's key file, whose method (Noise or WebCrypto) it proves by; defaults to this user's |
 | `--allow-origin` | | an `Origin` whose page may use the endpoint; by default any request with one is refused |
 | `--forward-header` | | a header to pass to the agent as a service parameter |
 | `--token-file` | `COQUI_A2A_TOKEN_FILE` | the file holding the bearer token; defaults to this user's, made the first time |

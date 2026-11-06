@@ -26,8 +26,8 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "33be56624cd44f0948468ab2e0c1fb53b5ea5de1" }
-coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "6fd0ca3446e7702d2dd323824a6b97b31851d665" }
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "9b1fee4aa12969d7e070182ebc820ca7593fdc17" }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "445007acb04f1b11f8f0f7c9fcf104f694189a2b" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Timestamps in the form the specification fixes: ISO 8601 in UTC.
@@ -52,7 +52,7 @@ url = { version = "2.5", optional = true }
 [dev-dependencies]
 coqui-acp = { git = "https://github.com/Boriken-Dev/coqui-acp", rev = "59ecf70c28181a41c856ade747cfc4725684228a" }
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", features = ["pin"] }
-coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "6fd0ca3446e7702d2dd323824a6b97b31851d665", features = ["websocket"] }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "445007acb04f1b11f8f0f7c9fcf104f694189a2b", features = ["websocket"] }
 proptest = "1"
 url = "2.5"
 

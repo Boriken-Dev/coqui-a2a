@@ -55,7 +55,7 @@ A stream ended by the agent with no `finish` reaches the client as a last JSON-R
 | `--listen` | `COQUI_A2A_LISTEN` | a loopback address, default `127.0.0.1:0` |
 | `--peer` | | the remote peer's id, pinned, repeatable; required unless `--any-paired-peer` is given |
 | `--any-paired-peer` | | accepts every peer paired in this user's trust store as the agent |
-| `--identity` | | this side's key file; default this user's |
+| `--identity` | | this side's key file, whose method (Noise or WebCrypto) it proves by; default this user's |
 | `--allow-origin` | | an `Origin` whose page may use the endpoint, repeatable; refused at start if no browser could send it (`*`, `null`, a path) |
 | `--forward-header` | | a header to pass to the agent as a service parameter, repeatable, for a credential its card names |
 | `--token-file` | `COQUI_A2A_TOKEN_FILE` | the file holding the bearer token; default this user's, made the first time |

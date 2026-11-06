@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use coqui_a2a::loopback::{Config, Hub, Loopback};
-use coqui_agentic_peer::auth::{self, Sealed};
+use coqui_agentic_peer::auth::{self, Proof, Sealed, Trust};
 use coqui_agentic_peer::mux::{Heartbeat, Limits, Mux, Side};
 use coqui_agentic_peer::{Error, home};
 use coqui_peer_tls as tls;
-use coqui_peer_webcrypto::{Trust, TrustStore, WebCrypto};
+use coqui_peer_webcrypto::TrustStore;
 use coqui_web::websocket::{Dialer, Frames};
 use coqui_web::{Channel as _, Dialer as _, Failure, Kind};
 use url::Url;
@@ -68,7 +68,7 @@ struct Loopback_ {
     /// as it to whatever uses this endpoint.
     #[arg(long, conflicts_with = "peers")]
     any_paired_peer: bool,
-    /// This side's identity file. Defaults to this user's.
+    /// This side's identity file, whose key's method is the one it proves by. Defaults to this user's.
     #[arg(long)]
     identity: Option<PathBuf>,
     /// Lets a page from this Origin use the endpoint, repeatable; by default any request with an
@@ -131,14 +131,15 @@ fn loopback(args: &Loopback_) -> Result<(), String> {
         config = config.with_token(token_from(&file, args.token_file.is_none())?);
         Some(file)
     };
-    let identity = home::identity(args.identity.as_deref()).map_err(|error| error.to_string())?;
+    let identity =
+        home::identity(args.identity.as_deref(), None).map_err(|error| error.to_string())?;
     let (trust, store) = if args.peers.is_empty() {
         let store = Arc::new(home::store(None).map_err(|error| error.to_string())?);
         (Trust::Store(TrustStore::clone(&store)), Some(store))
     } else {
         (Trust::pinned(args.peers.iter().copied()), None)
     };
-    let method = WebCrypto::new(identity).with_responders(trust);
+    let method = Proof::new(identity).with_responders(trust);
 
     let hub = Hub::new();
     let endpoint = Loopback::start(config, Arc::clone(&hub)).map_err(|error| error.to_string())?;
@@ -159,7 +160,7 @@ fn loopback(args: &Loopback_) -> Result<(), String> {
                     &method,
                     &channel,
                     PROOF_TIMEOUT,
-                    MAX_MESSAGE + auth::RECORD_OVERHEAD,
+                    method.method().record_length(MAX_MESSAGE),
                 );
                 match proved {
                     Ok(established) => {

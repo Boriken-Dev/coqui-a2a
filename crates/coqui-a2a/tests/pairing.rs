@@ -49,7 +49,7 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
         let (identity, store, desk) = (server_identity.clone(), server_store.clone(), desk.clone());
         thread::spawn(move || {
             let channel = listener.next(Some(WAIT)).unwrap().handshake().unwrap();
-            let paired = pairing::respond(&channel, &identity, &store, &desk, None, WAIT);
+            let paired = pairing::respond(&channel, &identity.into(), &store, &desk, None, WAIT);
             channel.close();
             paired.map(|paired| paired.peer.id().to_string())
         })
@@ -63,7 +63,14 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
         )
         .unwrap();
     let pin = Pin::parse(&CodeAlphabet::pin(), pin.as_str()).unwrap();
-    pairing::join(&channel, &client_identity, pin, &client_store, WAIT).unwrap();
+    pairing::join(
+        &channel,
+        &client_identity.clone().into(),
+        pin,
+        &client_store,
+        WAIT,
+    )
+    .unwrap();
     channel.close();
     let paired_peer = responder.join().unwrap().unwrap();
     assert_eq!(paired_peer, client_identity.peer_id().to_string());

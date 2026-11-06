@@ -112,9 +112,12 @@ impl Host {
                     let Ok(channel) = pending.handshake() else {
                         return;
                     };
-                    if let Ok(established) =
-                        auth::prove(&*method, &channel, WAIT, MAX_LINE + auth::RECORD_OVERHEAD)
-                    {
+                    if let Ok(established) = auth::prove(
+                        &*method,
+                        &channel,
+                        WAIT,
+                        auth::Method::WebCrypto.record_length(MAX_LINE),
+                    ) {
                         let peer = established.peer.to_string();
                         let sealed = Sealed::new(&channel, established.session);
                         let host = LinkHost {
@@ -175,7 +178,13 @@ pub fn over_link_with<R>(
         .with_frames(Frames::Binary)
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
-    let established = prove_out(&method, &channel, WAIT, MAX_LINE + auth::RECORD_OVERHEAD).unwrap();
+    let established = prove_out(
+        &method,
+        &channel,
+        WAIT,
+        auth::Method::WebCrypto.record_length(MAX_LINE),
+    )
+    .unwrap();
     let sealed = Sealed::new(&channel, established.session);
     let result = Mux::run(&sealed, Side::Dialed, limits, None, body);
     sealed.close();
