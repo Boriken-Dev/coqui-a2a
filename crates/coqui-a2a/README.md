@@ -27,7 +27,7 @@ cargo add --git https://github.com/Boriken-Dev/coqui-a2a coqui-a2a
 | `loopback` | the `loopback` module: an HTTP endpoint on a loopback address (`axum`, `hyper`, `tokio`) |
 | `cli` | the `coqui-a2a` command (`loopback`, `clap`, the link's identity and TLS pieces) |
 
-A default build depends on `coqui-agentic-peer`, `coqui-web`, `serde`, `serde_json` and `time`. MSRV is Rust 1.89.
+A default build depends on `coqui-agentic-peer`, `coqui-web-channel`, `serde`, `serde_json` and `time`. MSRV is Rust 1.89.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ A client, over the mux of a link that has proved its peer:
 use coqui_a2a::model::{Message, Role, SendMessageRequest};
 use coqui_a2a::{Client, ClientError};
 use coqui_agentic_peer::mux::Mux;
-use coqui_web::Channel;
+use coqui_web_channel::Channel;
 
 fn ask<C: Channel>(mux: &Mux<'_, C>) -> Result<(), ClientError> {
     let client = Client::new(mux);

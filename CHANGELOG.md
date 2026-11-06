@@ -19,4 +19,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- coqui-agentic-peer is pinned at `9b1fee4`, which proves by Noise or WebCrypto, and coqui-web at `445007a`, the revision it pins.
+- coqui-agentic-peer is pinned at `f6da790`, which proves by Noise or WebCrypto, and the channel crate is `coqui-web-channel`, renamed from coqui-web, at `0b5b05c` (coqui-web's `3b39c00` under its new name), the revision it pins.

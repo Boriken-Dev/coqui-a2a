@@ -5,7 +5,7 @@ use core::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use coqui_agentic_peer::mux::{Mux, Stream, StreamEnd};
-use coqui_web::{Channel, Failure};
+use coqui_web_channel::{Channel, Failure};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;

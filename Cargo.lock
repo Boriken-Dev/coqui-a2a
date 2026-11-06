@@ -450,7 +450,7 @@ dependencies = [
  "coqui-peer",
  "coqui-peer-tls",
  "coqui-peer-webcrypto",
- "coqui-web",
+ "coqui-web-channel",
  "futures-util",
  "hyper",
  "hyper-util",
@@ -477,12 +477,12 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=9b1fee4aa12969d7e070182ebc820ca7593fdc17#9b1fee4aa12969d7e070182ebc820ca7593fdc17"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=f6da790585e51345fa58f5e989cedd6500a0b962#f6da790585e51345fa58f5e989cedd6500a0b962"
 dependencies = [
  "coqui-peer",
  "coqui-peer-noise",
  "coqui-peer-webcrypto",
- "coqui-web",
+ "coqui-web-channel",
  "mdns-sd",
  "serde_json",
  "socket2",
@@ -549,9 +549,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "coqui-web"
+name = "coqui-web-channel"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-web?rev=445007acb04f1b11f8f0f7c9fcf104f694189a2b#445007acb04f1b11f8f0f7c9fcf104f694189a2b"
+source = "git+https://github.com/Boriken-Dev/coqui-web-channel.git?rev=0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca#0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca"
 dependencies = [
  "mio",
  "rustls",

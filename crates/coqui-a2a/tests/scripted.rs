@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use coqui_a2a::model::{Message, Role, SendMessageRequest, SendMessageResponse};
 use coqui_a2a::{Client, ClientError};
 use coqui_agentic_peer::mux::{CloseReason, Frame, Limits, Mux, Side};
-use coqui_web::{Channel, Failure};
+use coqui_web_channel::{Channel, Failure};
 use serde_json::json;
 
 /// What the peer does when the client's request arrives.

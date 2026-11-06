@@ -49,7 +49,7 @@ fn dependencies(section: &str) -> Vec<String> {
 fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
     let allowed = [
         "coqui-agentic-peer",
-        "coqui-web",
+        "coqui-web-channel",
         "serde",
         "serde_json",
         "time",

@@ -15,8 +15,8 @@ use coqui_agentic_peer::pairing;
 use coqui_agentic_peer::peers::{FilePeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
 use coqui_peer_webcrypto::{Identity, Trust, TrustStore};
-use coqui_web::websocket::{Dialer, Frames, Listener};
-use coqui_web::{Channel as _, Dialer as _, Kind};
+use coqui_web_channel::websocket::{Dialer, Frames, Listener};
+use coqui_web_channel::{Channel as _, Dialer as _, Kind};
 use support::agent::{Echo, user};
 use support::link::{Host, Setup, WAIT, over_link_with};
 
@@ -41,7 +41,9 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
     let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), None)
         .unwrap()
         .with_frames(Frames::Binary)
-        .with_limits(coqui_web::Limits::default().with_max_message(auth::MAX_PROOF_MESSAGE));
+        .with_limits(
+            coqui_web_channel::Limits::default().with_max_message(auth::MAX_PROOF_MESSAGE),
+        );
     let address = listener.local_addr().unwrap();
     let desk = pairing::desk().unwrap();
     let pin = desk.show_pin().unwrap().pin;

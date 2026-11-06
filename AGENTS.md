@@ -36,7 +36,7 @@ COQUI_A2A_BIN=target/debug/coqui-a2a COQUI_A2A_ECHO=target/debug/examples/echo_s
 - **This crate holds only the mapping of A2A onto a link.** Proof, pairing, sealing, channels, discovery and the companion are `coqui-agentic-peer`'s; a test (`tests/layering.rs`) fails when the library names one of its own. A need for something from the link crate is a change there.
 - **The wire is a contract.** A change to a message, a code or a name changes `docs/binding.md` and `vectors/binding.json` in the same commit, and a change that breaks an existing message takes a new binding identifier.
 - **The error table is data.** `ErrorKind::ALL` is the table; `tests/errors.rs` walks it and compares it to the table in `docs/binding.md`.
-- **The link crate is pinned by git revision** in `crates/coqui-a2a/Cargo.toml` and in `[patch.crates-io]` of the root manifest. Move the pins together with `coqui-web` and `coqui-peer-webcrypto`.
+- **The link crate is pinned by git revision** in `crates/coqui-a2a/Cargo.toml` and in `[patch.crates-io]` of the root manifest. Move the pins together with `coqui-web-channel` and `coqui-peer-webcrypto`.
 - **The loopback endpoint is reachable by every program on the machine and by web pages.** It binds loopback only, refuses any `Origin` not listed, what a browser marks as coming from a page, and any `Host` that is not a loopback name, and takes a bearer token unless told by name not to.
 - **Only `finish` says an answer is whole.** A server sends it after a whole answer and at no other time; a client that reads the end of a stream asks `finished_by_peer`.
 - No push notifications in binding version 1; do not add a webhook sender.

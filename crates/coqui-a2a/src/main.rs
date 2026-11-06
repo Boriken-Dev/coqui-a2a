@@ -16,8 +16,8 @@ use coqui_agentic_peer::mux::{Heartbeat, Limits, Mux, Side};
 use coqui_agentic_peer::{Error, home};
 use coqui_peer_tls as tls;
 use coqui_peer_webcrypto::TrustStore;
-use coqui_web::websocket::{Dialer, Frames};
-use coqui_web::{Channel as _, Dialer as _, Failure, Kind};
+use coqui_web_channel::websocket::{Dialer, Frames};
+use coqui_web_channel::{Channel as _, Dialer as _, Failure, Kind};
 use url::Url;
 
 /// The largest message on the link, which A2A results and cards fit within.

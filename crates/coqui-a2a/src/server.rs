@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use coqui_agentic_peer::link::{Accepted, Handler, Services};
 use coqui_agentic_peer::mux::{CloseReason, LinkStream, StreamLife};
-use coqui_web::Failure;
+use coqui_web_channel::Failure;
 use serde::Serialize;
 use serde_json::Value;
 

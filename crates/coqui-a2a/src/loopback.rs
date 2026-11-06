@@ -35,7 +35,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::{get, post};
 use coqui_agentic_peer::mux::{CloseReason, LinkState, Mux};
-use coqui_web::{Channel, Failure};
+use coqui_web_channel::{Channel, Failure};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
