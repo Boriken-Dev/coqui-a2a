@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "coqui-acp"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-acp?rev=59ecf70c28181a41c856ade747cfc4725684228a#59ecf70c28181a41c856ade747cfc4725684228a"
+source = "git+https://github.com/Boriken-Dev/coqui-acp?rev=b1bbd1ac316ccabcb946d713d854579434036f1e#b1bbd1ac316ccabcb946d713d854579434036f1e"
 dependencies = [
  "agent-client-protocol",
  "futures",
@@ -477,7 +477,7 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=e513bb769f99923b8a715b6b5596298dbe244016#e513bb769f99923b8a715b6b5596298dbe244016"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=3cd5e04cfc7bc5d7a976a9e85d8eb808662db997#3cd5e04cfc7bc5d7a976a9e85d8eb808662db997"
 dependencies = [
  "coqui-peer",
  "coqui-peer-noise",
@@ -508,7 +508,7 @@ dependencies = [
 [[package]]
 name = "coqui-peer-noise"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-noise?rev=01e1781d463971f67999fa0c8056f8036d78562e#01e1781d463971f67999fa0c8056f8036d78562e"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-noise?rev=169db79428af8f5824c7f151f8fa4601f34854dc#169db79428af8f5824c7f151f8fa4601f34854dc"
 dependencies = [
  "aes-gcm",
  "coqui-peer",
@@ -523,7 +523,7 @@ dependencies = [
 [[package]]
 name = "coqui-peer-tls"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-tls?rev=365a6498af6389fe89cc50e0a51e6eb685996da2#365a6498af6389fe89cc50e0a51e6eb685996da2"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-tls?rev=50bd7ffc6ee75e9fdf1838d5668cfdbd07f286d1#50bd7ffc6ee75e9fdf1838d5668cfdbd07f286d1"
 dependencies = [
  "coqui-peer",
  "rustls",
@@ -533,7 +533,7 @@ dependencies = [
 [[package]]
 name = "coqui-peer-webcrypto"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-webcrypto?rev=6d44feb0842b4318941d12b1c92a899c521ed814#6d44feb0842b4318941d12b1c92a899c521ed814"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-webcrypto?rev=a491a0034e0a9084c7aa3a5298f3b3c649ae7941#a491a0034e0a9084c7aa3a5298f3b3c649ae7941"
 dependencies = [
  "aes-gcm",
  "coqui-peer",

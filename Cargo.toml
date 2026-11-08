@@ -23,4 +23,4 @@ alloc_instead_of_core = "warn"
 [patch.crates-io]
 coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "b6aa1f47ca956578ffcd20f936c43e8663ed059a" }
 # The published coqui-peer-tls still names coqui-peer's old field; this commit follows it.
-coqui-peer-tls = { git = "https://github.com/Boriken-Dev/coqui-peer-tls", rev = "365a6498af6389fe89cc50e0a51e6eb685996da2" }
+coqui-peer-tls = { git = "https://github.com/Boriken-Dev/coqui-peer-tls", rev = "50bd7ffc6ee75e9fdf1838d5668cfdbd07f286d1" }
