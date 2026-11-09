@@ -21,6 +21,6 @@ alloc_instead_of_core = "warn"
 
 # One PeerId type across the graph needs one source.
 [patch.crates-io]
-coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "b6aa1f47ca956578ffcd20f936c43e8663ed059a" }
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "381e2a8144a228e592dc7d82eeb7db85885422ec" }
 # The published coqui-peer-tls still names coqui-peer's old field; this commit follows it.
-coqui-peer-tls = { git = "https://github.com/Boriken-Dev/coqui-peer-tls", rev = "50bd7ffc6ee75e9fdf1838d5668cfdbd07f286d1" }
+coqui-peer-tls = { git = "https://github.com/Boriken-Dev/coqui-peer-tls", rev = "e5c1e6df27260ba3b4cec0a1ad5e37a04652e5f4" }

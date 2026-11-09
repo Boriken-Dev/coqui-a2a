@@ -139,7 +139,10 @@ fn loopback(args: &Loopback_) -> Result<(), String> {
     } else {
         (Trust::pinned(args.peers.iter().copied()), None)
     };
-    let method = Proof::new(identity).with_responders(trust);
+    let method = Proof::builder(identity)
+        .responders(trust)
+        .build()
+        .map_err(|error| error.to_string())?;
 
     let hub = Hub::new();
     let endpoint = Loopback::start(config, Arc::clone(&hub)).map_err(|error| error.to_string())?;
@@ -280,9 +283,10 @@ fn tls_client(ca_file: Option<&PathBuf>) -> Result<Arc<rustls::ClientConfig>, St
         Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
         None => tls::Trust::AnyWithKeyProof,
     };
-    let config =
-        tls::client_config_without_identity(&trust, &[]).map_err(|error| error.to_string())?;
-    Ok(Arc::new(config))
+    let built = tls::ClientBuilder::new(trust)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::new(built.config))
 }
 
 #[cfg(test)]

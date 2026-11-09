@@ -96,7 +96,11 @@ impl Host {
             .with_frames(Frames::Binary);
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let method = Arc::new(WebCrypto::new(setup.identity).with_initiators(setup.initiators));
+        let method = Arc::new(
+            WebCrypto::builder(setup.identity)
+                .initiators(setup.initiators)
+                .build(),
+        );
         let (store, services, options) = (setup.store, Arc::new(setup.services), setup.options);
         let flag = Arc::clone(&stop);
         let accept = thread::spawn(move || {
@@ -175,7 +179,9 @@ pub fn over_link_with<R>(
     limits: Limits,
     body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>) -> R,
 ) -> R {
-    let method = WebCrypto::new(client).with_responders(Trust::pinned([server]));
+    let method = WebCrypto::builder(client)
+        .responders(Trust::pinned([server]))
+        .build();
     let channel = WsDialer::new()
         .with_frames(Frames::Binary)
         .dial(Kind::WebSocket, &url, WAIT)
