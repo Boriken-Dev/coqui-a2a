@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "coqui-acp"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-acp?rev=374534143b419d4f94f63d286db508642bdfdc1a#374534143b419d4f94f63d286db508642bdfdc1a"
+source = "git+https://github.com/Boriken-Dev/coqui-acp?rev=c15c0ff96d4bf8b8f56aae671a6ab73f8319825a#c15c0ff96d4bf8b8f56aae671a6ab73f8319825a"
 dependencies = [
  "agent-client-protocol",
  "futures",
@@ -477,8 +477,9 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=33f64efc8789d346c3799402f9a2b068d0b4c6b2#33f64efc8789d346c3799402f9a2b068d0b4c6b2"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=2966a25c956678e44e23faf3757d2b34c6a769f3#2966a25c956678e44e23faf3757d2b34c6a769f3"
 dependencies = [
+ "coqui-builder",
  "coqui-peer",
  "coqui-peer-noise",
  "coqui-peer-webcrypto",
@@ -490,13 +491,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "coqui-builder"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/coqui-builder?rev=c1875f8276bd6366c38e9133fdb1181a0ffbaaad#c1875f8276bd6366c38e9133fdb1181a0ffbaaad"
+dependencies = [
+ "coqui-builder-derive",
+]
+
+[[package]]
+name = "coqui-builder-derive"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/coqui-builder?rev=c1875f8276bd6366c38e9133fdb1181a0ffbaaad#c1875f8276bd6366c38e9133fdb1181a0ffbaaad"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "coqui-peer"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/coqui-peer?rev=381e2a8144a228e592dc7d82eeb7db85885422ec#381e2a8144a228e592dc7d82eeb7db85885422ec"
+source = "git+https://github.com/Boriken-Dev/coqui-peer?rev=984db3d54b73de10c7892b06fe269a259de2d1c5#984db3d54b73de10c7892b06fe269a259de2d1c5"
 dependencies = [
+ "coqui-builder",
  "data-encoding",
- "guatiao",
- "guatiao-serde",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "rand_core 0.6.4",
@@ -510,13 +528,13 @@ dependencies = [
 [[package]]
 name = "coqui-peer-noise"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-noise?rev=6fd5137ef13d908581f6d1c9b0ca6b1bc19e3df3#6fd5137ef13d908581f6d1c9b0ca6b1bc19e3df3"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-noise?rev=3a5b30689780a6e6291af565ff6abbaae515973c#3a5b30689780a6e6291af565ff6abbaae515973c"
 dependencies = [
  "aes-gcm",
+ "coqui-builder",
  "coqui-peer",
  "data-encoding",
  "getrandom 0.4.3",
- "guatiao",
  "hkdf 0.13.0",
  "sha2 0.11.1",
  "x25519-dalek",
@@ -526,10 +544,10 @@ dependencies = [
 [[package]]
 name = "coqui-peer-tls"
 version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-tls?rev=e5c1e6df27260ba3b4cec0a1ad5e37a04652e5f4#e5c1e6df27260ba3b4cec0a1ad5e37a04652e5f4"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-tls?rev=7cbd7ee208595c055d74eed79a4dafcd0175883d#7cbd7ee208595c055d74eed79a4dafcd0175883d"
 dependencies = [
+ "coqui-builder",
  "coqui-peer",
- "guatiao",
  "rustls",
  "rustls-webpki",
 ]
@@ -537,13 +555,13 @@ dependencies = [
 [[package]]
 name = "coqui-peer-webcrypto"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-peer-webcrypto?rev=95ee8d4a6d4ed461bd53021c92972e79bf10a864#95ee8d4a6d4ed461bd53021c92972e79bf10a864"
+source = "git+https://github.com/Boriken-Dev/coqui-peer-webcrypto?rev=9146f55dd9fb9be8d6d96f43e17bc7a057ba0681#9146f55dd9fb9be8d6d96f43e17bc7a057ba0681"
 dependencies = [
  "aes-gcm",
+ "coqui-builder",
  "coqui-peer",
  "data-encoding",
  "getrandom 0.4.3",
- "guatiao",
  "hkdf 0.13.0",
  "p256",
  "serde",
@@ -1118,34 +1136,6 @@ dependencies = [
  "ff",
  "rand_core 0.10.1",
  "subtle",
-]
-
-[[package]]
-name = "guatiao"
-version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=0350bae7fef4cef2aa46ce73f1ef6be15983d83b#0350bae7fef4cef2aa46ce73f1ef6be15983d83b"
-dependencies = [
- "guatiao-derive",
-]
-
-[[package]]
-name = "guatiao-derive"
-version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=0350bae7fef4cef2aa46ce73f1ef6be15983d83b#0350bae7fef4cef2aa46ce73f1ef6be15983d83b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "guatiao-serde"
-version = "0.0.0-alpha.1"
-source = "git+https://github.com/Boriken-Dev/guatiao?rev=0350bae7fef4cef2aa46ce73f1ef6be15983d83b#0350bae7fef4cef2aa46ce73f1ef6be15983d83b"
-dependencies = [
- "guatiao",
- "serde",
- "serde_json",
 ]
 
 [[package]]

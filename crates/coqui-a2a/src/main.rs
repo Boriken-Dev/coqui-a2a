@@ -283,7 +283,8 @@ fn tls_client(ca_file: Option<&PathBuf>) -> Result<Arc<rustls::ClientConfig>, St
         Some(file) => tls::Trust::Roots(tls::Roots::bundle_file(file)),
         None => tls::Trust::AnyWithKeyProof,
     };
-    let built = tls::ClientBuilder::new(trust)
+    let built = tls::ClientBuilder::new()
+        .server(trust)
         .build()
         .map_err(|error| error.to_string())?;
     Ok(Arc::new(built.config))
