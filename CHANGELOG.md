@@ -19,5 +19,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- coqui-agentic-peer is pinned at `f6da790`, which proves by Noise or WebCrypto, and the channel crate is `coqui-web-channel`, renamed from coqui-web, at `0b5b05c` (coqui-web's `3b39c00` under its new name), the revision it pins.
+- The channel crate is `coqui-transport` (`coqui_transport::{Channel, Failure}`, pinned at `1283116`), replacing `coqui-web-channel`; the command dials with `coqui-transport-web` (`c8df842`, feature `cli`) and coqui-agentic-peer is at `8dad176`, which pins the same. The library's public API is unchanged: its types are generic over `coqui_transport::Channel`.
 - The peer family is on `coqui-builder`: coqui-agentic-peer `2966a25`, coqui-peer `984db3d`, coqui-peer-tls `7cbd7ee`, coqui-peer-webcrypto `9146f55` and coqui-acp (tests only) `c15c0ff`, with one copy of each in the graph. The command builds its TLS client with `ClientBuilder::new().server(trust)`, and the tests build a WebCrypto method with `WebCrypto::builder().identity(..)`, whose `build()` can fail with a missing input. No wire, binding message or error changed.

@@ -5,9 +5,9 @@ Header-file-style reference for the `coqui-a2a` crate: every public item with it
 | Feature | Adds | Default |
 | --- | --- | --- |
 | `loopback` | module `loopback`: an HTTP endpoint on a loopback address (`axum`, `hyper`, `hyper-util`, `tokio`, `futures-util`, `subtle`, `serde_json/raw_value`) | off |
-| `cli` | the `coqui-a2a` command (`loopback`, `clap`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `rustls`, `url`) | off |
+| `cli` | the `coqui-a2a` command (`loopback`, `clap`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `rustls`, `url`, `coqui-transport-web`) | off |
 
-MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-agentic-peer`, `coqui-web-channel`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-agentic-peer`'s. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
+MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-agentic-peer`, `coqui-transport`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-agentic-peer`'s. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
 
 Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `loopback` (feature).
 
