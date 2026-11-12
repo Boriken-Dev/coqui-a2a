@@ -13,8 +13,8 @@ A2A running on a proven `coqui-agentic-peer` link, as an A2A custom protocol bin
 | `docs/binding.md` | the binding's specification: usable without this code |
 | `docs/loopback.md` | the loopback command |
 | `vectors/binding.json` | binding messages as data, which every implementation runs |
-| `crates/coqui-a2a/src` | `model` (A2A types), `wire`, `error`, `agent`, `server`, `client`, `loopback`, `main.rs` (the command) |
-| `crates/coqui-a2a/tests` | link, pairing, loopback, command, scripted-peer, codec, error-table and layering tests; `support/` is a real proven link and an echo agent |
+| `crates/coqui-a2a/src` | `model` (A2A types), `wire`, `error`, `agent`, `server`, `tasks` (feature: the task store), `client`, `loopback`, `main.rs` (the command) |
+| `crates/coqui-a2a/tests` | link, pairing, loopback, command, scripted-peer, codec, error-table, layering, in-process-call, task-store and card-selection tests; `support/` is a real proven link and an echo agent |
 | `crates/coqui-a2a/examples/echo_server.rs` | an agent on a link, used by the SDK check |
 | `scripts/sdk-check.mjs` | the official JavaScript SDK through the command; skips when the SDK is absent |
 

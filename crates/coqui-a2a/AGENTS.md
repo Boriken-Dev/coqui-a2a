@@ -4,12 +4,13 @@ Header-file-style reference for the `coqui-a2a` crate: every public item with it
 
 | Feature | Adds | Default |
 | --- | --- | --- |
+| `tasks` | module `tasks`: a `TaskStore` for an agent's tasks (std only) | off |
 | `loopback` | module `loopback`: an HTTP endpoint on a loopback address (`axum`, `hyper`, `hyper-util`, `tokio`, `futures-util`, `subtle`, `serde_json/raw_value`) | off |
 | `cli` | the `coqui-a2a` command (`loopback`, `clap`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `rustls`, `url`, `coqui-transport-web`) | off |
 
 MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-agentic-peer`, `coqui-transport`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-agentic-peer`'s. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
 
-Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Reply`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `loopback` (feature).
+Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Reply`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `tasks`, `loopback` (features).
 
 ## Constants (`coqui_a2a`)
 
@@ -60,6 +61,43 @@ pub struct ServerLimits { pub max_request: usize, pub request_timeout: Duration,
 - A send waits for a slow client's credit, up to `reader_stall`. Past that the stream is closed as `broken`. `finish` follows only an answer sent whole.
 - An `Events` iterator runs on a thread of its own. A quiet one must return soon after its `Watch` closes, since the operation waits for it.
 - `Caller::peer` is the identity: it comes from the link's proof. Authorize per caller; `ListTasks` returns only the caller's tasks.
+
+## Tasks (`coqui_a2a::tasks`, feature `tasks`)
+
+The tasks of an agent in memory, for a host that runs work for callers. No I/O, no thread of its own; std only.
+
+```rust
+pub struct TaskStore;                                   // Clone (clones share one store), Debug
+pub fn TaskStore::builder() -> TaskStoreBuilder
+pub fn TaskStore::limits(&self) -> TaskLimits
+
+// Caller-facing: the owner is `caller.peer`; another caller's task is TaskNotFound; the caller's Watch ends a subscription.
+pub fn TaskStore::create(&self, caller: &Caller<'_>, request: &SendMessageRequest) -> Result<Task, A2aError>   // the message names no task; SUBMITTED; history = [message]; request.tenant and metadata kept
+pub fn TaskStore::append(&self, caller: &Caller<'_>, request: &SendMessageRequest) -> Result<Task, A2aError>   // the message names the task; changes no state
+pub fn TaskStore::get(&self, caller: &Caller<'_>, request: &GetTaskRequest) -> Result<Task, A2aError>          // historyLength: last N, 0 none
+pub fn TaskStore::list(&self, caller: &Caller<'_>, request: &ListTasksRequest) -> Result<ListTasksResponse, A2aError>   // newest change first; no artifacts unless includeArtifacts
+pub fn TaskStore::cancel(&self, caller: &Caller<'_>, request: &CancelTaskRequest) -> Result<Task, A2aError>    // cancel hook, then CANCELED
+pub fn TaskStore::subscribe(&self, caller: &Caller<'_>, request: &SubscribeToTaskRequest) -> Result<Events, A2aError>   // the task as it is, then each update
+
+// For the code that does the work (not a caller; owns nothing):
+pub fn TaskStore::update_status(&self, id: &str, state: TaskState, message: Option<Message>) -> Result<Task, A2aError>
+pub fn TaskStore::add_artifact(&self, id: &str, artifact: Artifact, append: bool, last_chunk: bool) -> Result<(), A2aError>
+pub fn TaskStore::snapshot(&self, id: &str) -> Option<Task>        // whoever owns it: the host's, never a caller's
+
+pub struct TaskStoreBuilder;                         // #[must_use]; setters named for the setting
+pub fn TaskStoreBuilder::limits(self, TaskLimits) / max_tasks / max_tasks_per_owner / max_history / max_artifacts / max_artifact_bytes / max_subscribers / subscriber_queue / default_page_size / max_page_size (self, usize) -> Self
+pub fn TaskStoreBuilder::cancel_hook(self, hook: impl Fn(&Task) -> Result<(), A2aError> + Send + Sync + 'static) -> Self
+pub fn TaskStoreBuilder::build(self) -> TaskStore
+pub struct TaskLimits { pub max_tasks: usize, pub max_tasks_per_owner: usize, pub max_history: usize, pub max_artifacts: usize, pub max_artifact_bytes: usize, pub max_subscribers: usize, pub subscriber_queue: usize, pub default_page_size: usize, pub max_page_size: usize }   // non_exhaustive, Copy, Default: 1024, 256, 64, 16, 1 MiB, 8, 256, 50, 100
+```
+
+- **Terminal states.** `COMPLETED`, `FAILED`, `CANCELED` and `REJECTED` are final. After one: `append`, `update_status` and `add_artifact` are `UnsupportedOperation`, `subscribe` is `UnsupportedOperation`, `cancel` is `TaskNotCancelable`, and nothing in the task changes. A task waits (`INPUT_REQUIRED`, `AUTH_REQUIRED`) and works again as often as it needs, never goes back to `SUBMITTED`, and takes no unspecified or unknown state (`InvalidParams`).
+- **Subscribers.** The first item is the task as it is, taken under the lock that registers the subscriber, so no update is missed or repeated; then a status update for each `update_status` (its message joins the history) and an artifact update for each `add_artifact`, in the order made. The iterator ends after the update that ends the task, or when the caller's `Watch` closes. An agent that streams a task it has just made subscribes before it starts the work, else a quick task has ended first and the subscription is refused.
+- **A slow subscriber never holds up the work.** One whose queue (`subscriber_queue`) is full is cut off; its iterator yields its queued items and then `Err(Internal)`, so a stream is never mistaken for whole. The same error ends a subscription whose store went away before the task ended.
+- **Limits are settings, none has a floor.** At `max_tasks` (or `max_tasks_per_owner` for the caller) a new task drops the ended task that changed longest ago, and is `InvalidRequest` when none has ended. Over `max_history` the oldest messages go. A new artifact past `max_artifacts`, or a change past `max_artifact_bytes` (JSON bytes), is `InvalidAgentResponse` and changes nothing. More than `max_subscribers` live subscribers on a task is `InvalidRequest`; a dropped iterator frees its place.
+- **Cancel.** The hook runs with no lock held and stops the work; on `Ok` the store ends the task `CANCELED`, on an error that error is the answer and the task is as it was.
+- **Tenant.** `create` stores `request.tenant`. A request that names a tenant sees only tasks of that tenant (others are `TaskNotFound`, and `ListTasks` filters); one that names none sees all of the caller's tasks. The store does not choose the agent: that is the host's, by `AgentCard::select_skill`.
+- `list` pages by a token that is opaque to the caller; a task changed while paging moves to the front. Ids and context ids are `task-` or `context-` and 22 hex digits; ownership, not secrecy, is what protects a task.
 
 ## Client (`coqui_a2a::client`)
 

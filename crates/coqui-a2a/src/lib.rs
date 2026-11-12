@@ -11,6 +11,9 @@ pub mod error;
 pub mod loopback;
 pub mod model;
 pub mod server;
+#[cfg(feature = "tasks")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
+pub mod tasks;
 pub mod wire;
 
 pub use agent::{Agent, Caller, Events, Watch};
