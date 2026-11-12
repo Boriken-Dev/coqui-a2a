@@ -165,3 +165,17 @@ fn the_choice_is_the_same_over_a_link() {
         assert!(!error.message.contains("alpha, beta"));
     });
 }
+
+#[test]
+fn an_empty_tenant_is_no_tenant() {
+    assert_eq!(
+        agent_of(&in_process("guest", Some("")).unwrap()),
+        "task-of-alpha"
+    );
+    let error = in_process("owner", Some("")).unwrap_err();
+    assert!(
+        error.message.contains("name the agent"),
+        "{}",
+        error.message
+    );
+}

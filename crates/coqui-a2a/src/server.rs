@@ -144,9 +144,10 @@ impl Server {
     /// As [`Server::call`], for `SendStreamingMessage` and `SubscribeToTask`.
     ///
     /// The iterator ends after the item that puts the task in a terminal state, after a first item
-    /// that is a message, and after an error, as a link's stream does. Nothing closes the caller's
-    /// [`Watch`] when the iterator is dropped: the host does when it stops reading, since only it
-    /// knows whether the watch is shared. A quiet iterator returns soon after the watch closes.
+    /// that is a message, and after an error, as a link's stream does. The agent is given a watch of
+    /// the call's own ([`Watch::child`]): it closes when the caller's watch does and when the
+    /// iterator is dropped, so an agent that waits is released without ending the caller's other
+    /// operations. A quiet iterator returns soon after its watch closes.
     ///
     /// # Errors
     ///
@@ -157,12 +158,18 @@ impl Server {
         method: Method,
         params: Value,
     ) -> Result<Events, A2aError> {
-        let card = self.admit(caller, method)?;
+        // The agent is given a watch of this call's own: it closes when the caller's does, and when
+        // the iterator is dropped, which is what frees an agent that waits on it.
+        let own = caller.watch().child();
+        let closes = CloseOnDrop(own.clone());
+        let caller = caller.watched(&own);
+        let card = self.admit(&caller, method)?;
         if !method.streams() {
             return Err(form_error(method, false));
         }
-        match self.invoke(caller, method, card, params)? {
+        match self.invoke(&caller, method, card, params)? {
             Outcome::Events(events) => Ok(Box::new(Bounded {
+                _closes: closes,
                 events,
                 first: true,
                 done: false,
@@ -605,6 +612,8 @@ fn without_webhooks(mut card: AgentCard) -> AgentCard {
 /// after the item that ends the task, after a first message and after an error, and a panic in the
 /// agent is an error.
 struct Bounded {
+    /// Declared first, so the watch closes before the agent's iterator is dropped.
+    _closes: CloseOnDrop,
     events: Events,
     first: bool,
     done: bool,

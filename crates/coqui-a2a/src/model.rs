@@ -792,6 +792,8 @@ impl AgentCard {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        // An empty member is an unset one in proto3 JSON.
+        let tenant = tenant.filter(|tenant| !tenant.is_empty());
         match (tenant, self.skills.as_slice()) {
             (_, []) => Err(A2aError::new(
                 ErrorKind::InvalidParams,

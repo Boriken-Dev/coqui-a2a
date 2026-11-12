@@ -4,8 +4,8 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use coqui_a2a::error::{A2aError, ErrorKind};
 use coqui_a2a::model::{
@@ -32,6 +32,8 @@ struct Plain {
     needs_extension: bool,
     /// Times a method reached the agent.
     reached: Arc<AtomicUsize>,
+    /// What `Caller::is_local` said, and the watch the agent was given, at each streaming call.
+    seen: Arc<Mutex<Vec<(bool, Watch)>>>,
 }
 
 impl Plain {
@@ -80,10 +82,14 @@ impl Agent for Plain {
 
     fn send_streaming_message(
         &self,
-        _caller: &Caller<'_>,
+        caller: &Caller<'_>,
         request: SendMessageRequest,
     ) -> Result<Events, A2aError> {
         self.reached.fetch_add(1, Ordering::SeqCst);
+        self.seen
+            .lock()
+            .unwrap()
+            .push((caller.is_local(), caller.watch()));
         let finished = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
             task_id: "task-1".to_owned(),
             status: TaskStatus::now(TaskState::Completed),
@@ -416,4 +422,57 @@ fn a_local_caller_is_open_until_its_watch_is_closed() {
     watch.close();
     assert!(!caller.is_open());
     assert!(kept.is_closed());
+}
+
+#[test]
+fn a_dropped_stream_closes_its_own_watch_and_not_the_callers() {
+    let agent = Plain {
+        streams: true,
+        ..Plain::default()
+    };
+    let (claims, watch, none) = (BTreeMap::new(), Watch::new(), ServiceParameters::default());
+    let caller = Caller::local("local:host", &claims, &none, &watch);
+    let server = Server::new(agent.clone());
+    let events = server
+        .stream(&caller, Method::SendStreamingMessage, user("hi"))
+        .unwrap();
+    let (local, given) = agent.seen.lock().unwrap()[0].clone();
+    assert!(local);
+    assert!(!given.is_closed());
+    drop(events);
+    // What the agent was waiting on is released, and the host's own watch is still open for the
+    // next operation.
+    assert!(given.is_closed());
+    assert!(!watch.is_closed());
+
+    // Closing the host's watch ends every operation it started.
+    let events = server
+        .stream(&caller, Method::SendStreamingMessage, user("hi"))
+        .unwrap();
+    let given = agent.seen.lock().unwrap()[1].1.clone();
+    watch.close();
+    assert!(given.is_closed());
+    drop(events);
+}
+
+#[test]
+fn a_caller_on_a_link_is_not_local_and_no_proved_id_is_in_the_local_namespace() {
+    let agent = Plain {
+        streams: true,
+        ..Plain::default()
+    };
+    let none = ServiceParameters::default();
+    let events = on_a_link_streaming(&agent, &none);
+    assert!(events);
+    assert!(!agent.seen.lock().unwrap()[0].0);
+    // A proved peer id is the hash form the link crate makes; nothing in it starts with `local:`.
+    for _ in 0..32 {
+        let id = Identity::generate().unwrap().peer_id().to_string();
+        assert!(!id.starts_with("local:"), "{id}");
+    }
+}
+
+/// Opens `SendStreamingMessage` over a real link, for the agent to see its caller.
+fn on_a_link_streaming(agent: &Plain, parameters: &ServiceParameters) -> bool {
+    on_a_link(agent, parameters, Method::SendStreamingMessage, &user("hi")).is_none()
 }
