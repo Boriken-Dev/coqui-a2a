@@ -115,7 +115,8 @@ The data model is A2A 1.0's, as ProtoJSON writes it, which is the form every A2A
 | Timestamps | ISO 8601 in UTC with a `Z` suffix, milliseconds where available: `2026-11-02T10:30:00.123Z`. No other offset |
 | Binary data | `Part.raw` is a base64 string (RFC 4648, standard alphabet, with padding). Nothing is added: the binding has no binary framing, and a file larger than the link's message bound is sent by `url`, or in `TaskArtifactUpdateEvent` chunks with `append` |
 | `oneof` groups | exactly one member is present: a Part holds one of `text`, `raw`, `url`, `data`; a SendMessageResponse holds `task` or `message`; a StreamResponse holds one of `task`, `message`, `statusUpdate`, `artifactUpdate` |
-| Absent and empty | an absent optional field is omitted, never `null`; `ListTasks` with `includeArtifacts` false omits `artifacts` from each task |
+| Absent and empty | an absent optional field is omitted, never `null`; `ListTasks` with `includeArtifacts` false omits `artifacts` from each task. As in proto3 JSON, a request member that is empty text or zero is the same as absent: `tenant: ""`, `contextId: ""`, `pageToken: ""` and `pageSize: 0` are unset, and `pageSize: 0` is the server's default size, not one |
+| Times in a request | `statusTimestampAfter` is any RFC 3339 time, in any offset, compared as an instant. A value that is not one is `InvalidParamsError` |
 | Unknown members | ignored when reading and kept when relaying, except in a card a relay serves ([The Agent Card](#the-agent-card)) |
 | `google.protobuf.Struct` and `Any` | any JSON value |
 | Required fields | a server SHOULD reject a request that lacks them with `InvalidParamsError` |

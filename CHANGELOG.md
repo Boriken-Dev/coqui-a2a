@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `AgentCard::select_skill` and a section of the binding page, "Several agents behind one card": each agent is a `skills` entry whose `id` is its tenant name, and a request chooses one with `tenant`. No tenant is the card's one skill, and an unlisted tenant, no tenant on a card of several and a card of none are `InvalidParamsError` naming only the ids the caller's card lists.
 
+- `Caller::is_local`, `Watch::child` and `TaskStore::inspect` (with `TaskRecord`), and a documented `local:` namespace for local callers.
+- `TaskLimits::max_history_bytes` and `max_metadata_bytes`; every limit error names its setting in `ErrorInfo.metadata.limit`.
+- A cancel marks the task cancelling before the hook runs, so a terminal state the stopped work reports lands as `CANCELED` and a second cancel runs no hook. A store never drops another owner's task to make room. An empty `tenant`, `contextId` or `pageToken` and a `pageSize` of 0 are unset, `statusTimestampAfter` is parsed as an RFC 3339 instant, and page tokens are opaque. `Server::stream` gives the agent a watch of the call's own, closed when the stream is dropped.
+
 ### Changed
 
 - The channel crate is `coqui-transport` (`coqui_transport::{Channel, Failure}`, pinned at `1283116`), replacing `coqui-web-channel`; the command dials with `coqui-transport-web` (`c8df842`, feature `cli`) and coqui-agentic-peer is at `8dad176`, which pins the same. The library's public API is unchanged: its types are generic over `coqui_transport::Channel`.

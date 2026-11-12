@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use coqui_a2a::error::{A2aError, ErrorKind};
@@ -593,36 +593,6 @@ fn history_artifacts_and_bytes_are_bounded() {
 }
 
 #[test]
-fn tasks_are_bounded_and_the_oldest_ended_task_makes_room() {
-    let store = TaskStore::builder()
-        .max_tasks(3)
-        .max_tasks_per_owner(2)
-        .build();
-    let (alice, bob) = (Who::new("alice"), Who::new("bob"));
-    let first = store.create(&alice.caller(), &request("1")).unwrap();
-    let second = store.create(&alice.caller(), &request("2")).unwrap();
-    // A third while both are alive is refused, and it is alice's limit, not bob's.
-    let error = store.create(&alice.caller(), &request("3")).unwrap_err();
-    assert_eq!(kind(&error), Some(ErrorKind::InvalidRequest));
-    store.create(&bob.caller(), &request("b1")).unwrap();
-
-    // The store is full: bob's second needs room, and only an ended task can give it.
-    let error = store.create(&bob.caller(), &request("b2")).unwrap_err();
-    assert_eq!(kind(&error), Some(ErrorKind::InvalidRequest));
-    store
-        .update_status(&second.id, TaskState::Completed, None)
-        .unwrap();
-    store
-        .update_status(&first.id, TaskState::Failed, None)
-        .unwrap();
-    store.create(&bob.caller(), &request("b2")).unwrap();
-    // The one that went was the oldest of those that had ended, and nothing alive went.
-    assert!(store.snapshot(&second.id).is_none());
-    assert!(store.snapshot(&first.id).is_some());
-    assert_eq!(store.limits().max_tasks, 3);
-}
-
-#[test]
 fn a_subscriber_that_falls_behind_is_told_so_and_never_mistaken_for_whole() {
     let store = TaskStore::builder().subscriber_queue(2).build();
     let me = Who::new("a");
@@ -904,4 +874,357 @@ fn an_agent_over_a_store_serves_two_local_callers_each_their_own_tasks() {
         panic!("a task");
     };
     assert_eq!(mine.status.state, TaskState::Completed);
+}
+
+fn limit_of(error: &A2aError) -> Option<&str> {
+    error.data[0]["metadata"]["limit"].as_str()
+}
+
+#[test]
+fn a_task_that_ends_on_its_own_while_the_hook_stops_it_is_canceled_not_failed() {
+    let cell: Arc<OnceLock<TaskStore>> = Arc::new(OnceLock::new());
+    let store = TaskStore::builder()
+        .cancel_hook({
+            let cell = Arc::clone(&cell);
+            move |task: &Task| {
+                // The hook kills the work; the waiter on the work reports it as failed.
+                let late = cell
+                    .get()
+                    .unwrap()
+                    .update_status(&task.id, TaskState::Failed, None);
+                assert_eq!(late.unwrap().status.state, TaskState::Canceled);
+                Ok(())
+            }
+        })
+        .build();
+    cell.set(store.clone()).unwrap();
+    let me = Who::new("a");
+    let task = store.create(&me.caller(), &request("hi")).unwrap();
+    store
+        .update_status(&task.id, TaskState::Working, None)
+        .unwrap();
+    let mut events = store
+        .subscribe(
+            &me.caller(),
+            &SubscribeToTaskRequest {
+                id: task.id.clone(),
+                ..SubscribeToTaskRequest::default()
+            },
+        )
+        .unwrap();
+    next(&mut events);
+    let canceled = store
+        .cancel(
+            &me.caller(),
+            &CancelTaskRequest {
+                id: task.id.clone(),
+                ..CancelTaskRequest::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(canceled.status.state, TaskState::Canceled);
+    let states: Vec<TaskState> = events.map(|item| state_of(&item.unwrap())).collect();
+    assert_eq!(states, [TaskState::Canceled]);
+    assert_eq!(
+        store.snapshot(&task.id).unwrap().status.state,
+        TaskState::Canceled
+    );
+}
+
+#[test]
+fn two_cancels_at_once_run_the_hook_once() {
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let store = TaskStore::builder()
+        .cancel_hook({
+            let runs = Arc::clone(&runs);
+            let entered_tx = Mutex::new(entered_tx);
+            move |_: &Task| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                entered_tx.lock().unwrap().send(()).unwrap();
+                released.lock().unwrap().recv().unwrap();
+                Ok(())
+            }
+        })
+        .build();
+    let me = Who::new("a");
+    let task = store.create(&me.caller(), &request("hi")).unwrap();
+    let cancel = CancelTaskRequest {
+        id: task.id.clone(),
+        ..CancelTaskRequest::default()
+    };
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| store.cancel(&me.caller(), &cancel));
+        entered.recv().unwrap();
+        // The second is answered at once with the task as it is, and runs nothing.
+        let second = store.cancel(&me.caller(), &cancel).unwrap();
+        assert_ne!(second.status.state, TaskState::Canceled);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        let first = first.join().unwrap().unwrap();
+        assert_eq!(first.status.state, TaskState::Canceled);
+    });
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_hook_that_refuses_leaves_the_task_open_to_another_cancel() {
+    let store = TaskStore::builder()
+        .cancel_hook(|_: &Task| Err(A2aError::standard(ErrorKind::TaskNotCancelable)))
+        .build();
+    let me = Who::new("a");
+    let task = store.create(&me.caller(), &request("hi")).unwrap();
+    let cancel = CancelTaskRequest {
+        id: task.id.clone(),
+        ..CancelTaskRequest::default()
+    };
+    for _ in 0..2 {
+        let error = store.cancel(&me.caller(), &cancel).unwrap_err();
+        assert_eq!(kind(&error), Some(ErrorKind::TaskNotCancelable));
+    }
+    // It ends on its own as usual.
+    store
+        .update_status(&task.id, TaskState::Completed, None)
+        .unwrap();
+}
+
+#[test]
+fn history_and_metadata_are_bounded_in_bytes() {
+    let store = TaskStore::builder()
+        .max_history_bytes(4000)
+        .max_metadata_bytes(100)
+        .build();
+    let me = Who::new("a");
+    let task = store.create(&me.caller(), &request("m0")).unwrap();
+    for n in 1..=12 {
+        let text = format!("{n:02}{}", "x".repeat(500));
+        store
+            .append(&me.caller(), &follow_up(&task, &text))
+            .unwrap();
+    }
+    let history = store.snapshot(&task.id).unwrap().history.unwrap();
+    let bytes: usize = history
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap().len())
+        .sum();
+    assert!(bytes <= 4000, "{bytes}");
+    assert!(history.len() >= 2);
+    // The newest are the ones kept.
+    assert!(history.last().unwrap().joined_text().starts_with("12"));
+
+    let error = store
+        .append(&me.caller(), &follow_up(&task, &"y".repeat(5000)))
+        .unwrap_err();
+    assert_eq!(kind(&error), Some(ErrorKind::InvalidRequest));
+    assert_eq!(limit_of(&error), Some("max_history_bytes"));
+    // A status message is held to the same.
+    let error = store
+        .update_status(
+            &task.id,
+            TaskState::Working,
+            Some(message(&"z".repeat(5000))),
+        )
+        .unwrap_err();
+    assert_eq!(limit_of(&error), Some("max_history_bytes"));
+    assert_eq!(
+        store.snapshot(&task.id).unwrap().status.state,
+        TaskState::Submitted
+    );
+
+    let mut big = request("meta");
+    big.metadata = Some(serde_json::from_value(json!({ "blob": "m".repeat(500) })).unwrap());
+    let error = store.create(&me.caller(), &big).unwrap_err();
+    assert_eq!(kind(&error), Some(ErrorKind::InvalidRequest));
+    assert_eq!(limit_of(&error), Some("max_metadata_bytes"));
+}
+
+#[test]
+fn one_owner_never_evicts_or_locks_out_anothers_tasks() {
+    let store = TaskStore::builder()
+        .max_tasks(3)
+        .max_tasks_per_owner(2)
+        .build();
+    let (alice, bob) = (Who::new("alice"), Who::new("bob"));
+    let a1 = store.create(&alice.caller(), &request("a1")).unwrap();
+    let a2 = store.create(&alice.caller(), &request("a2")).unwrap();
+    store
+        .update_status(&a1.id, TaskState::Completed, None)
+        .unwrap();
+    store
+        .update_status(&a2.id, TaskState::Completed, None)
+        .unwrap();
+    store.create(&bob.caller(), &request("b1")).unwrap();
+
+    // The store is full. Bob has nothing ended of his own, and alice's ended tasks are hers.
+    let error = store.create(&bob.caller(), &request("b2")).unwrap_err();
+    assert_eq!(kind(&error), Some(ErrorKind::InvalidRequest));
+    assert_eq!(limit_of(&error), Some("max_tasks"));
+    assert!(store.snapshot(&a1.id).is_some());
+    assert!(store.snapshot(&a2.id).is_some());
+
+    // Alice makes room for herself by dropping her own oldest ended task, and only that one.
+    let a3 = store.create(&alice.caller(), &request("a3")).unwrap();
+    assert!(store.snapshot(&a1.id).is_none());
+    assert!(store.snapshot(&a2.id).is_some());
+    assert!(store.snapshot(&a3.id).is_some());
+
+    // Her next one drops her other ended task, and then she is at her cap with nothing ended: she
+    // is refused, and bob's task is untouched.
+    let a4 = store.create(&alice.caller(), &request("a4")).unwrap();
+    assert!(store.snapshot(&a2.id).is_none());
+    assert!(store.snapshot(&a3.id).is_some() && store.snapshot(&a4.id).is_some());
+    let error = store.create(&alice.caller(), &request("a5")).unwrap_err();
+    assert_eq!(limit_of(&error), Some("max_tasks_per_owner"));
+    assert_eq!(
+        store
+            .list(&bob.caller(), &ListTasksRequest::default())
+            .unwrap()
+            .tasks
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn an_inspected_task_names_its_owner_and_tenant() {
+    let store = TaskStore::builder().build();
+    let me = Who::new("local:session-1");
+    let mut asking = request("hi");
+    asking.tenant = Some("x".to_owned());
+    let task = store.create(&me.caller(), &asking).unwrap();
+    let record = store.inspect(&task.id).unwrap();
+    assert_eq!(record.owner, "local:session-1");
+    assert_eq!(record.tenant.as_deref(), Some("x"));
+    assert_eq!(record.task, task);
+    assert!(store.inspect("nobody").is_none());
+}
+
+#[test]
+fn an_empty_tenant_and_a_page_size_of_zero_are_unset() {
+    let store = TaskStore::builder().default_page_size(3).build();
+    let me = Who::new("a");
+    let mut empty = request("one");
+    empty.tenant = Some(String::new());
+    empty.message.context_id = Some(String::new());
+    let first = store.create(&me.caller(), &empty).unwrap();
+    assert!(first.context_id.as_deref().is_some_and(|c| !c.is_empty()));
+    assert_eq!(store.inspect(&first.id).unwrap().tenant, None);
+    for n in 0..4 {
+        store
+            .create(&me.caller(), &request(&format!("t{n}")))
+            .unwrap();
+    }
+    let listed = store
+        .list(
+            &me.caller(),
+            &ListTasksRequest {
+                tenant: Some(String::new()),
+                page_size: Some(0),
+                ..ListTasksRequest::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(listed.total_size, 5);
+    // Zero is the default size, not one.
+    assert_eq!(listed.tasks.len(), 3);
+    // An empty tenant on a lookup narrows nothing.
+    let got = store
+        .get(
+            &me.caller(),
+            &GetTaskRequest {
+                tenant: Some(String::new()),
+                ..id(&first.id)
+            },
+        )
+        .unwrap();
+    assert_eq!(got.id, first.id);
+}
+
+#[test]
+fn status_timestamp_after_is_read_as_a_time() {
+    let store = TaskStore::builder().build();
+    let me = Who::new("a");
+    // Some millisecond other than .000, so that a second without a fraction falls just before it.
+    let task = loop {
+        let task = store.create(&me.caller(), &request("t")).unwrap();
+        if !task.status.timestamp.as_ref().unwrap().ends_with(".000Z") {
+            break task;
+        }
+    };
+    let stamp = task.status.timestamp.clone().unwrap();
+    let list = |after: &str| {
+        store.list(
+            &me.caller(),
+            &ListTasksRequest {
+                status_timestamp_after: Some(after.to_owned()),
+                ..ListTasksRequest::default()
+            },
+        )
+    };
+    let whole_second = format!("{}Z", &stamp[..19]);
+    let mut hits = list(&whole_second).unwrap().tasks.into_iter();
+    assert!(
+        hits.any(|hit| hit.id == task.id),
+        "{whole_second} vs {stamp}"
+    );
+    assert!(list("2000-01-01T00:00:00Z").unwrap().total_size >= 1);
+    assert!(list("2999-01-01T00:00:00Z").unwrap().tasks.is_empty());
+    // An offset names the same instant: a time far in the past in another zone is still past.
+    assert!(!list("2000-01-01T05:00:00+05:00").unwrap().tasks.is_empty());
+    assert!(list("2999-01-01T00:00:00-12:00").unwrap().tasks.is_empty());
+    for bad in ["yesterday", "2026-11-12", "2026-11-12 10:00:00", "1"] {
+        let error = list(bad).unwrap_err();
+        assert_eq!(kind(&error), Some(ErrorKind::InvalidParams), "{bad}");
+    }
+}
+
+#[test]
+fn ids_have_no_counter_and_a_page_token_is_opaque() {
+    let store = TaskStore::builder().build();
+    let me = Who::new("a");
+    for n in 0..3 {
+        let task = store
+            .create(&me.caller(), &request(&format!("t{n}")))
+            .unwrap();
+        let (kind_of, digits) = task.id.split_once('-').unwrap();
+        assert_eq!(kind_of, "task");
+        assert_eq!(digits.len(), 16, "{}", task.id);
+        assert!(digits.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    let page = store
+        .list(
+            &me.caller(),
+            &ListTasksRequest {
+                page_size: Some(1),
+                ..ListTasksRequest::default()
+            },
+        )
+        .unwrap();
+    let token = page.next_page_token;
+    assert!(!token.is_empty());
+    assert!(!token.chars().all(|c| c.is_ascii_digit()), "{token}");
+    // It works as a token, and a number does not.
+    let next = store
+        .list(
+            &me.caller(),
+            &ListTasksRequest {
+                page_size: Some(1),
+                page_token: Some(token),
+                ..ListTasksRequest::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(next.tasks.len(), 1);
+    let error = store
+        .list(
+            &me.caller(),
+            &ListTasksRequest {
+                page_token: Some("2".to_owned()),
+                ..ListTasksRequest::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(kind(&error), Some(ErrorKind::InvalidParams));
 }

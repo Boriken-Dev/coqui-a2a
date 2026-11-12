@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -23,9 +24,23 @@ use crate::agent::{Caller, Events, Watch};
 use crate::error::{A2aError, ErrorKind};
 use crate::model::{
     Artifact, CancelTaskRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse, Message,
-    SendMessageRequest, StreamResponse, SubscribeToTaskRequest, Task, TaskArtifactUpdateEvent,
-    TaskState, TaskStatus, TaskStatusUpdateEvent,
+    Object, SendMessageRequest, StreamResponse, SubscribeToTaskRequest, Task,
+    TaskArtifactUpdateEvent, TaskState, TaskStatus, TaskStatusUpdateEvent,
 };
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+/// A task and who it belongs to.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct TaskRecord {
+    /// The [`Caller::peer`] that made it.
+    pub owner: String,
+    /// The tenant it was made under.
+    pub tenant: Option<String>,
+    /// The task.
+    pub task: Task,
+}
 
 /// What a store holds a host to. Each is a setting of [`TaskStoreBuilder`]; there is no floor, so
 /// a limit of zero refuses everything it counts.
@@ -47,6 +62,11 @@ pub struct TaskLimits {
     pub max_artifact_bytes: usize,
     /// Subscribers following one task at once. Default 8.
     pub max_subscribers: usize,
+    /// Bytes of a task's history, as JSON; the oldest messages go first. A single message past it
+    /// is refused. Default 1 MiB.
+    pub max_history_bytes: usize,
+    /// Bytes of a task's `metadata`, as JSON; a task made with more is refused. Default 64 KiB.
+    pub max_metadata_bytes: usize,
     /// Updates waiting for one subscriber. One that falls this far behind is cut off, and told so,
     /// so that a slow reader never holds up the work. Default 256.
     pub subscriber_queue: usize,
@@ -62,6 +82,8 @@ impl Default for TaskLimits {
             max_tasks: 1024,
             max_tasks_per_owner: 256,
             max_history: 64,
+            max_history_bytes: 1 << 20,
+            max_metadata_bytes: 64 << 10,
             max_artifacts: 16,
             max_artifact_bytes: 1 << 20,
             max_subscribers: 8,
@@ -115,6 +137,10 @@ impl TaskStoreBuilder {
         max_tasks_per_owner,
         /// See [`TaskLimits::max_history`].
         max_history,
+        /// See [`TaskLimits::max_history_bytes`].
+        max_history_bytes,
+        /// See [`TaskLimits::max_metadata_bytes`].
+        max_metadata_bytes,
         /// See [`TaskLimits::max_artifacts`].
         max_artifacts,
         /// See [`TaskLimits::max_artifact_bytes`].
@@ -146,7 +172,10 @@ impl TaskStoreBuilder {
     pub fn build(self) -> TaskStore {
         TaskStore {
             shared: Arc::new(Shared {
-                inner: Mutex::new(Inner::default()),
+                inner: Mutex::new(Inner {
+                    salt: RandomState::new().build_hasher().finish(),
+                    ..Inner::default()
+                }),
                 limits: self.limits,
                 cancel: self.cancel,
             }),
@@ -173,6 +202,8 @@ struct Inner {
     clock: u64,
     /// Bumped by every id made, which with a random part keeps ids apart.
     made: u64,
+    /// Hides the clock in a page token.
+    salt: u64,
 }
 
 struct Entry {
@@ -182,6 +213,8 @@ struct Entry {
     /// The `clock` when the task last changed.
     seq: u64,
     artifact_bytes: usize,
+    /// A cancellation is under way: the hook is running.
+    cancelling: bool,
     subscribers: Vec<Subscriber>,
 }
 
@@ -242,11 +275,13 @@ impl TaskStore {
             ));
         }
         let limits = &self.shared.limits;
+        check_message(&request.message, limits)?;
+        check_metadata(request.metadata.as_ref(), limits)?;
         let mut inner = self.lock();
         inner.make_room(caller.peer, limits)?;
         let id = inner.new_id("task");
-        let context = match &request.message.context_id {
-            Some(context) => context.clone(),
+        let context = match set(request.message.context_id.as_deref()) {
+            Some(context) => context.to_owned(),
             None => inner.new_id("context"),
         };
         let mut message = request.message.clone();
@@ -266,10 +301,11 @@ impl TaskStore {
             id,
             Entry {
                 owner: caller.peer.to_owned(),
-                tenant: request.tenant.clone(),
+                tenant: set(request.tenant.as_deref()).map(str::to_owned),
                 task: task.clone(),
                 seq,
                 artifact_bytes: 0,
+                cancelling: false,
                 subscribers: Vec::new(),
             },
         );
@@ -296,16 +332,14 @@ impl TaskStore {
                 "the message names no task",
             ));
         };
-        let max_history = self.shared.limits.max_history;
+        let limits = &self.shared.limits;
+        check_message(&request.message, limits)?;
         let mut inner = self.lock();
         let seq = inner.touch();
         let entry = inner.visible(caller.peer, request.tenant.as_deref(), id)?;
         ended_means(entry, ErrorKind::UnsupportedOperation)?;
-        if request
-            .message
-            .context_id
-            .as_ref()
-            .is_some_and(|context| Some(context) != entry.task.context_id.as_ref())
+        if set(request.message.context_id.as_deref())
+            .is_some_and(|context| Some(context) != entry.task.context_id.as_deref())
         {
             return Err(A2aError::new(
                 ErrorKind::InvalidParams,
@@ -314,7 +348,7 @@ impl TaskStore {
         }
         let mut message = request.message.clone();
         message.context_id.clone_from(&entry.task.context_id);
-        entry.remember(message, max_history);
+        entry.remember(message, limits);
         entry.seq = seq;
         Ok(entry.task.clone())
     }
@@ -344,46 +378,61 @@ impl TaskStore {
         request: &ListTasksRequest,
     ) -> Result<ListTasksResponse, A2aError> {
         let limits = &self.shared.limits;
-        let before = match &request.page_token {
+        let inner = self.lock();
+        let before = match set(request.page_token.as_deref()) {
             None => u64::MAX,
-            Some(token) if token.is_empty() => u64::MAX,
-            Some(token) => token.parse::<u64>().map_err(|_| {
+            Some(token) => token
+                .strip_prefix('p')
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                .map(|hidden| hidden ^ inner.salt)
+                .ok_or_else(|| {
+                    A2aError::new(
+                        ErrorKind::InvalidParams,
+                        "the page token is not one of ours",
+                    )
+                })?,
+        };
+        // Zero is the same as none, as for any member of a request.
+        let size = match request.page_size {
+            None | Some(0) => limits.default_page_size,
+            Some(size) => size as usize,
+        }
+        .clamp(1, limits.max_page_size.max(1));
+        let after = match set(request.status_timestamp_after.as_deref()) {
+            None => None,
+            Some(text) => Some(parse_time(text).ok_or_else(|| {
                 A2aError::new(
                     ErrorKind::InvalidParams,
-                    "the page token is not one of ours",
+                    "statusTimestampAfter is not an RFC 3339 time",
                 )
-            })?,
+            })?),
         };
-        let size = request
-            .page_size
-            .map_or(limits.default_page_size, |size| size as usize)
-            .clamp(1, limits.max_page_size.max(1));
-        let inner = self.lock();
+        let (tenant, context) = (
+            set(request.tenant.as_deref()),
+            set(request.context_id.as_deref()),
+        );
         let mut matching: Vec<&Entry> = inner
             .tasks
             .values()
             .filter(|entry| entry.owner == caller.peer)
-            .filter(|entry| match &request.tenant {
-                Some(tenant) => entry.tenant.as_ref() == Some(tenant),
-                None => true,
-            })
-            .filter(|entry| match &request.context_id {
-                Some(context) => entry.task.context_id.as_ref() == Some(context),
-                None => true,
+            .filter(|entry| tenant.is_none_or(|tenant| entry.tenant.as_deref() == Some(tenant)))
+            .filter(|entry| {
+                context.is_none_or(|context| entry.task.context_id.as_deref() == Some(context))
             })
             .filter(|entry| match &request.status {
                 Some(state) => &entry.task.status.state == state,
                 None => true,
             })
-            .filter(|entry| match &request.status_timestamp_after {
-                // The timestamps are ISO 8601 in UTC with one form, which orders as text.
-                Some(after) => entry
-                    .task
-                    .status
-                    .timestamp
-                    .as_ref()
-                    .is_some_and(|stamp| stamp > after),
-                None => true,
+            .filter(|entry| {
+                after.is_none_or(|after| {
+                    entry
+                        .task
+                        .status
+                        .timestamp
+                        .as_deref()
+                        .and_then(parse_time)
+                        .is_some_and(|stamp| stamp > after)
+                })
             })
             .collect();
         matching.sort_by_key(|entry| core::cmp::Reverse(entry.seq));
@@ -402,7 +451,7 @@ impl TaskStore {
             .collect();
         Ok(ListTasksResponse {
             next_page_token: match (more, page.last()) {
-                (true, Some(last)) => last.seq.to_string(),
+                (true, Some(last)) => format!("p{:x}", last.seq ^ inner.salt),
                 _ => String::new(),
             },
             page_size: u32::try_from(tasks.len()).unwrap_or(u32::MAX),
@@ -423,30 +472,41 @@ impl TaskStore {
         caller: &Caller<'_>,
         request: &CancelTaskRequest,
     ) -> Result<Task, A2aError> {
+        let limits = &self.shared.limits;
         let task = {
             let mut inner = self.lock();
             let entry = inner.visible(caller.peer, request.tenant.as_deref(), &request.id)?;
             ended_means(entry, ErrorKind::TaskNotCancelable)?;
+            if entry.cancelling {
+                // Another cancel is stopping the work; it will answer for both.
+                return Ok(entry.task.clone());
+            }
+            entry.cancelling = true;
             entry.task.clone()
         };
-        if let Some(hook) = &self.shared.cancel {
-            hook(&task)?;
+        let stopped = match &self.shared.cancel {
+            Some(hook) => catch_unwind(AssertUnwindSafe(|| hook(&task))).unwrap_or_else(|_| {
+                Err(A2aError::new(ErrorKind::Internal, "the cancel hook failed"))
+            }),
+            None => Ok(()),
+        };
+        let mut inner = self.lock();
+        let Some(entry) = inner.tasks.get_mut(&request.id) else {
+            return Err(A2aError::task_not_found(&request.id));
+        };
+        entry.cancelling = false;
+        if entry.task.status.state.is_terminal() {
+            // The work ended while the hook ran, and what it reported became the cancellation.
+            return Ok(entry.task.clone());
         }
-        match self.update_status(&request.id, TaskState::Canceled, None) {
-            Ok(task) => Ok(task),
-            // Something else ended it while the hook ran: canceled by someone is what was asked.
-            Err(_) => match self.snapshot(&request.id) {
-                Some(now) if now.status.state == TaskState::Canceled => Ok(now),
-                Some(_) => Err(A2aError::standard(ErrorKind::TaskNotCancelable)),
-                None => Err(A2aError::task_not_found(&request.id)),
-            },
-        }
+        stopped?;
+        inner.set_status(&request.id, TaskState::Canceled, None, limits)
     }
 
     /// `SubscribeToTask`: the task as it is now, then each update in the order it was made, with
     /// nothing between the two missed. An agent that streams a task it has just made subscribes
-    /// before it starts the work, or a quick task has ended first and is refused. The iterator ends after the update that ends the task or
-    /// when the caller's [`Watch`] closes. One that cannot be served because the subscriber fell
+    /// before it starts the work, or a quick task has ended first and is refused. The iterator
+    /// ends after the update that ends the task or when the caller's [`Watch`] closes. One that cannot be served because the subscriber fell
     /// behind, or the store went away, ends with an error, never as a complete stream.
     ///
     /// # Errors
@@ -467,9 +527,10 @@ impl TaskStore {
             .subscribers
             .retain(|subscriber| subscriber.alive.strong_count() > 0);
         if entry.subscribers.len() >= limits.max_subscribers {
-            return Err(A2aError::new(
+            return Err(limit_reached(
                 ErrorKind::InvalidRequest,
-                "this task has too many subscribers",
+                "max_subscribers",
+                "subscribers of this task",
             ));
         }
         let (queue, updates) = std::sync::mpsc::sync_channel(limits.subscriber_queue.max(1));
@@ -511,44 +572,8 @@ impl TaskStore {
         state: TaskState,
         message: Option<Message>,
     ) -> Result<Task, A2aError> {
-        let max_history = self.shared.limits.max_history;
-        let mut inner = self.lock();
-        let seq = inner.touch();
-        let entry = inner
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| A2aError::task_not_found(id))?;
-        ended_means(entry, ErrorKind::UnsupportedOperation)?;
-        let known = !matches!(state, TaskState::Unspecified | TaskState::Other(_));
-        let back = state == TaskState::Submitted && entry.task.status.state != TaskState::Submitted;
-        if !known || back {
-            return Err(A2aError::new(
-                ErrorKind::InvalidParams,
-                format!("a task does not move to {state}"),
-            ));
-        }
-        let mut status = TaskStatus::now(state);
-        if let Some(mut message) = message {
-            message.task_id = Some(entry.task.id.clone());
-            message.context_id.clone_from(&entry.task.context_id);
-            entry.remember(message.clone(), max_history);
-            status.message = Some(message);
-        }
-        entry.task.status = status.clone();
-        entry.seq = seq;
-        let ends = entry.task.status.state.is_terminal();
-        let event = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-            task_id: entry.task.id.clone(),
-            context_id: entry.task.context_id.clone().unwrap_or_default(),
-            status,
-            ..TaskStatusUpdateEvent::default()
-        });
-        entry.publish(&event);
-        if ends {
-            // Each has been told, and a subscriber ends after the update that ends the task.
-            entry.subscribers.clear();
-        }
-        Ok(entry.task.clone())
+        let limits = &self.shared.limits;
+        self.lock().set_status(id, state, message, limits)
     }
 
     /// Adds an artifact to a task and tells the subscribers. With `append` the parts join the
@@ -588,14 +613,22 @@ impl TaskStore {
             (Some(at), false) => (artifact.clone(), json_size(&held[at])),
             (None, _) => {
                 if held.len() >= limits.max_artifacts {
-                    return Err(too_many("artifacts"));
+                    return Err(limit_reached(
+                        ErrorKind::InvalidAgentResponse,
+                        "max_artifacts",
+                        "artifacts",
+                    ));
                 }
                 (artifact.clone(), 0)
             }
         };
         let bytes = entry.artifact_bytes - replaced_bytes + json_size(&merged);
         if bytes > limits.max_artifact_bytes {
-            return Err(too_many("bytes of artifacts"));
+            return Err(limit_reached(
+                ErrorKind::InvalidAgentResponse,
+                "max_artifact_bytes",
+                "bytes of artifacts",
+            ));
         }
         let artifacts = entry.task.artifacts.get_or_insert_with(Vec::new);
         match at {
@@ -614,6 +647,17 @@ impl TaskStore {
         });
         entry.publish(&event);
         Ok(())
+    }
+
+    /// A task with its owner and tenant, whoever owns it: for the host's own code, never for a
+    /// caller.
+    #[must_use]
+    pub fn inspect(&self, id: &str) -> Option<TaskRecord> {
+        self.lock().tasks.get(id).map(|entry| TaskRecord {
+            owner: entry.owner.clone(),
+            tenant: entry.tenant.clone(),
+            task: entry.task.clone(),
+        })
     }
 
     /// A task as it is, whoever owns it: for the host's own code, never for a caller.
@@ -635,24 +679,21 @@ impl Inner {
             self.made += 1;
             let mut hasher = RandomState::new().build_hasher();
             hasher.write_u64(self.made);
-            let id = format!(
-                "{kind}-{:016x}{:06x}",
-                hasher.finish(),
-                self.made & 0xff_ffff
-            );
+            let id = format!("{kind}-{:016x}", hasher.finish());
             if !self.tasks.contains_key(&id) {
                 return id;
             }
         }
     }
 
-    /// The caller's task, which for anyone else is no task at all.
+    /// The caller's task, which for anyone else is no task at all. An empty tenant is none.
     fn visible(
         &mut self,
         owner: &str,
         tenant: Option<&str>,
         id: &str,
     ) -> Result<&mut Entry, A2aError> {
+        let tenant = set(tenant);
         self.tasks
             .get_mut(id)
             .filter(|entry| entry.owner == owner)
@@ -660,7 +701,8 @@ impl Inner {
             .ok_or_else(|| A2aError::task_not_found(id))
     }
 
-    /// Makes room for a task of `owner`, by dropping the task that ended longest ago.
+    /// Makes room for a task of `owner`, by dropping that owner's own ended task that changed
+    /// longest ago. Another owner's task is never dropped, so no owner takes another's room.
     fn make_room(&mut self, owner: &str, limits: &TaskLimits) -> Result<(), A2aError> {
         let owned = self
             .tasks
@@ -668,36 +710,108 @@ impl Inner {
             .filter(|entry| entry.owner == owner)
             .count();
         if owned >= limits.max_tasks_per_owner {
-            self.drop_ended(Some(owner))
-                .ok_or_else(|| too_many("tasks for this caller"))?;
+            self.drop_ended(owner).ok_or_else(|| {
+                limit_reached(
+                    ErrorKind::InvalidRequest,
+                    "max_tasks_per_owner",
+                    "tasks for this caller",
+                )
+            })?;
         }
         if self.tasks.len() >= limits.max_tasks {
-            self.drop_ended(None).ok_or_else(|| too_many("tasks"))?;
+            self.drop_ended(owner)
+                .ok_or_else(|| limit_reached(ErrorKind::InvalidRequest, "max_tasks", "tasks"))?;
         }
         Ok(())
     }
 
-    /// Drops the ended task, of `owner` if named, that changed longest ago.
-    fn drop_ended(&mut self, owner: Option<&str>) -> Option<()> {
+    /// Drops the ended task of `owner` that changed longest ago.
+    fn drop_ended(&mut self, owner: &str) -> Option<()> {
         let oldest = self
             .tasks
             .iter()
             .filter(|(_, entry)| entry.task.status.state.is_terminal())
-            .filter(|(_, entry)| owner.is_none_or(|owner| entry.owner == owner))
+            .filter(|(_, entry)| entry.owner == owner)
             .min_by_key(|(_, entry)| entry.seq)
             .map(|(id, _)| id.clone())?;
         self.tasks.remove(&oldest);
         Some(())
     }
+
+    /// Moves a task to `state`. While a cancellation is under way a terminal state lands as
+    /// `CANCELED`, since what the work reports then is its being stopped.
+    fn set_status(
+        &mut self,
+        id: &str,
+        state: TaskState,
+        message: Option<Message>,
+        limits: &TaskLimits,
+    ) -> Result<Task, A2aError> {
+        let seq = self.touch();
+        let entry = self
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| A2aError::task_not_found(id))?;
+        ended_means(entry, ErrorKind::UnsupportedOperation)?;
+        let known = !matches!(state, TaskState::Unspecified | TaskState::Other(_));
+        let back = state == TaskState::Submitted && entry.task.status.state != TaskState::Submitted;
+        if !known || back {
+            return Err(A2aError::new(
+                ErrorKind::InvalidParams,
+                format!("a task does not move to {state}"),
+            ));
+        }
+        let state = if entry.cancelling && state.is_terminal() {
+            TaskState::Canceled
+        } else {
+            state
+        };
+        let message = message.map(|mut message| {
+            message.task_id = Some(entry.task.id.clone());
+            message.context_id.clone_from(&entry.task.context_id);
+            message
+        });
+        if let Some(message) = &message {
+            check_message(message, limits)?;
+        }
+        let mut status = TaskStatus::now(state);
+        if let Some(message) = message {
+            entry.remember(message.clone(), limits);
+            status.message = Some(message);
+        }
+        entry.task.status = status.clone();
+        entry.seq = seq;
+        let ends = entry.task.status.state.is_terminal();
+        let event = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+            task_id: entry.task.id.clone(),
+            context_id: entry.task.context_id.clone().unwrap_or_default(),
+            status,
+            ..TaskStatusUpdateEvent::default()
+        });
+        entry.publish(&event);
+        if ends {
+            // Each has been told, and a subscriber ends after the update that ends the task.
+            entry.cancelling = false;
+            entry.subscribers.clear();
+        }
+        Ok(entry.task.clone())
+    }
 }
 
 impl Entry {
-    fn remember(&mut self, message: Message, max_history: usize) {
+    /// Keeps `message`, dropping the oldest while there are too many or they are too large. The
+    /// message has passed [`check_message`].
+    fn remember(&mut self, message: Message, limits: &TaskLimits) {
         let history = self.task.history.get_or_insert_with(Vec::new);
         history.push(message);
-        if history.len() > max_history {
-            let excess = history.len() - max_history;
-            history.drain(..excess);
+        let mut bytes: usize = history.iter().map(json_len).sum();
+        while history.len() > 1
+            && (history.len() > limits.max_history || bytes > limits.max_history_bytes)
+        {
+            bytes -= json_len(&history.remove(0));
+        }
+        if limits.max_history == 0 {
+            history.clear();
         }
     }
 
@@ -717,13 +831,40 @@ impl Entry {
     }
 }
 
-fn too_many(what: &str) -> A2aError {
-    let kind = if what.contains("artifact") {
-        ErrorKind::InvalidAgentResponse
+/// A limit that was reached: the caller sees which setting it is, in the error's metadata.
+fn limit_reached(kind: ErrorKind, limit: &str, what: &str) -> A2aError {
+    A2aError::new(kind, format!("the limit on {what} is reached")).with_metadata("limit", limit)
+}
+
+/// A value of a request member, where an empty one is the same as none (proto3 JSON).
+fn set(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.is_empty())
+}
+
+/// Refuses a message that alone is past the history's bytes.
+fn check_message(message: &Message, limits: &TaskLimits) -> Result<(), A2aError> {
+    if json_len(message) > limits.max_history_bytes {
+        Err(limit_reached(
+            ErrorKind::InvalidRequest,
+            "max_history_bytes",
+            "bytes of a message",
+        ))
     } else {
-        ErrorKind::InvalidRequest
-    };
-    A2aError::new(kind, format!("the limit on {what} is reached"))
+        Ok(())
+    }
+}
+
+/// Refuses a task whose metadata is past its bytes.
+fn check_metadata(metadata: Option<&Object>, limits: &TaskLimits) -> Result<(), A2aError> {
+    if metadata.is_some_and(|metadata| json_len(metadata) > limits.max_metadata_bytes) {
+        Err(limit_reached(
+            ErrorKind::InvalidRequest,
+            "max_metadata_bytes",
+            "bytes of metadata",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Refuses a task that has ended, as `kind`.
@@ -753,8 +894,16 @@ fn trimmed(task: &Task, history_length: Option<u32>, artifacts: bool) -> Task {
     task
 }
 
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
 fn json_size(artifact: &Artifact) -> usize {
-    serde_json::to_vec(artifact).map_or(0, |bytes| bytes.len())
+    json_len(artifact)
+}
+
+fn parse_time(text: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(text, &Rfc3339).ok()
 }
 
 /// How often a quiet subscription looks at its watch.

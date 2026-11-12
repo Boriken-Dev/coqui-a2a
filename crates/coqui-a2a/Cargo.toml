@@ -33,7 +33,7 @@ coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Timestamps in the form the specification fixes: ISO 8601 in UTC.
-time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "json"], optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time"], optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
