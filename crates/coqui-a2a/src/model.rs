@@ -773,6 +773,49 @@ pub struct AgentCard {
 }
 
 impl AgentCard {
+    /// The agent a request is for, on a card that lists several: the skill whose `id` is the
+    /// request's `tenant`. With no tenant the card has to list exactly one skill.
+    ///
+    /// A tenant the card does not list is refused the same way whether no such agent exists or
+    /// the caller may not use it, so a card shows a caller only the agents it may name: the caller
+    /// is the one the agent's `agent_card` was asked for.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidParamsError` naming the ids the card lists, for an unlisted tenant, for no tenant
+    /// on a card of several skills, and for a card of none.
+    pub fn select_skill(&self, tenant: Option<&str>) -> Result<&AgentSkill, A2aError> {
+        let listed = || {
+            self.skills
+                .iter()
+                .map(|skill| skill.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (tenant, self.skills.as_slice()) {
+            (_, []) => Err(A2aError::new(
+                ErrorKind::InvalidParams,
+                "this card lists no agent",
+            )),
+            (None, [only]) => Ok(only),
+            (None, _) => Err(A2aError::new(
+                ErrorKind::InvalidParams,
+                format!("name the agent in tenant: {}", listed()),
+            )),
+            (Some(tenant), skills) => {
+                skills
+                    .iter()
+                    .find(|skill| skill.id == tenant)
+                    .ok_or_else(|| {
+                        A2aError::new(
+                            ErrorKind::InvalidParams,
+                            format!("no agent is named {tenant:?}: {}", listed()),
+                        )
+                    })
+            }
+        }
+    }
+
     /// The interface entry that names this binding, if the card lists one.
     #[must_use]
     pub fn link_interface(&self) -> Option<&AgentInterface> {

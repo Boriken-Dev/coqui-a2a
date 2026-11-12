@@ -7,6 +7,11 @@
       "outcome": { "id": 1, "method": "SendMessage", "service_parameters": { "a2a-version": "1.0" } }
     },
     {
+      "name": "a send naming its agent by tenant",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"SendMessage\",\"params\":{\"tenant\":\"alpha\",\"message\":{\"messageId\":\"m1\",\"role\":\"ROLE_USER\",\"parts\":[{\"text\":\"hi\"}]}}}",
+      "outcome": { "id": 4, "method": "SendMessage", "service_parameters": {} }
+    },
+    {
       "name": "a string id and no params",
       "input": "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"GetExtendedAgentCard\"}",
       "outcome": { "id": "abc", "method": "GetExtendedAgentCard", "service_parameters": {} }

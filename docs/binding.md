@@ -220,6 +220,17 @@ The standard binding serves the card at `/.well-known/agent-card.json`. A link h
 
 A card MAY carry `securitySchemes` and `securityRequirements`. They describe what the agent asks for **in addition** to the link; the link's proof is never listed there, since A2A's schemes have no way to name an in-band key proof.
 
+## Several agents behind one card
+
+A link has one card, and a host may serve several agents on it. The card says which, and a request chooses one with the member A2A already defines for the purpose, `tenant`.
+
+- **The card.** Each agent is one entry of `skills`, and the entry's `id` is the agent's tenant name. A host that serves one agent needs no more than that agent's card. The card a peer reads is the one made for that peer, so it lists the agents that peer may use and no others.
+- **The request.** `tenant` is a member of the request's `params`, in every operation that defines it. `SendMessage` and `SendStreamingMessage` choose the agent that does the work: `tenant` is a skill `id` of the caller's card. With no `tenant`, a card of exactly one skill means that one; a card of several means none was chosen. Either failure, and a `tenant` the card does not list, is `InvalidParamsError`, and its message names the ids the card lists. An agent the peer may not use and an agent that does not exist are answered the same, and the message names only what the peer's card shows, so the refusal reveals nothing the card did not.
+- **Tasks.** The other operations name a task by `id`. A `tenant` on them narrows the request to the tasks that were made under it: a task of another tenant is `TaskNotFoundError`, as is one that another peer owns. With no `tenant`, the operation looks at every task of the peer. `ListTasks` with a `tenant` lists the tasks of that tenant only.
+- **The id is the name.** A tenant is compared as the exact text of the skill `id`, case included. A host that turns a name of its own into an id (a configured source, a directory) makes sure two names never give one id.
+
+The Rust library does this in two places. `AgentCard::select_skill` is the choice of an agent from a request's `tenant`, and the optional task store keeps each task's tenant for the narrowing above.
+
 ## Authentication and authorization
 
 **The link's proof is the authentication.** Before any byte of this binding is read, the link has proved which key each side holds and sealed everything after it. The server learns the peer's id from the proof, never from a request, and the link's grants, kept per peer by the host, decide whether the peer may open `a2a/1` at all and are checked again while a stream runs. The binding has no login, no token exchange and no certificate of its own.
@@ -267,6 +278,7 @@ A server never panics on input: bytes that are not JSON, JSON that is not a requ
 - The authentication of a request is the link's proof.
 - The two error types `UnauthenticatedError` and `PermissionDeniedError` are defined here.
 - Push notifications are unsupported.
+- Several agents on one card are told apart by `tenant`, which A2A's HTTP bindings put in the path and this one leaves in the parameters ([Several agents behind one card](#several-agents-behind-one-card)).
 
 ## An exchange
 

@@ -150,6 +150,7 @@ pub fn SendMessageRequest::new(message: Message) -> SendMessageRequest;  pub fn 
 pub fn TaskState::is_terminal(&self) -> bool;  pub fn TaskState::is_interrupted(&self) -> bool
 pub fn StreamResponse::ends_task(&self) -> bool
 pub fn AgentCard::link_interface(&self) -> Option<&AgentInterface>
+pub fn AgentCard::select_skill(&self, tenant: Option<&str>) -> Result<&AgentSkill, A2aError>   // several agents on one card: the skill whose id is the request's tenant
 pub fn TaskStatus::now(state: TaskState) -> TaskStatus
 pub fn timestamp_now() -> String                    // 2026-11-02T10:30:00.123Z
 pub fn params_as<T: DeserializeOwned>(params: Value) -> Result<T, A2aError>

@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Feature `tasks` and `tasks::TaskStore`: the tasks of an agent in memory, for a host that runs work for callers. It creates a task from a message, keeps its status, a bounded history and artifacts, owns each task to the `Caller::peer` that made it (another caller's id is `TaskNotFoundError`, `ListTasks` lists only the caller's), serves a subscriber the task as it is and then each update in order, refuses a message, an update, a subscription and a cancellation after a terminal state, and cuts off a subscriber that falls behind rather than hold up the work. Every limit (tasks, tasks per owner, history, artifacts, artifact bytes, subscribers, queue, page sizes) is a setting of `TaskStore::builder()`, and a cancel hook stops the work.
 
+- `AgentCard::select_skill` and a section of the binding page, "Several agents behind one card": each agent is a `skills` entry whose `id` is its tenant name, and a request chooses one with `tenant`. No tenant is the card's one skill, and an unlisted tenant, no tenant on a card of several and a card of none are `InvalidParamsError` naming only the ids the caller's card lists.
+
 ### Changed
 
 - The channel crate is `coqui-transport` (`coqui_transport::{Channel, Failure}`, pinned at `1283116`), replacing `coqui-web-channel`; the command dials with `coqui-transport-web` (`c8df842`, feature `cli`) and coqui-agentic-peer is at `8dad176`, which pins the same. The library's public API is unchanged: its types are generic over `coqui_transport::Channel`.
