@@ -19,7 +19,7 @@ use coqui_agentic_peer::link::{Services, capabilities};
 use coqui_agentic_peer::mux::LinkStream;
 use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
-use coqui_web_channel::Channel as _;
+use coqui_transport::Channel as _;
 use serde_json::{Value, json};
 use support::agent::{Echo, user};
 use support::link::{Host, Setup, WAIT, Watchdog, over_link};

@@ -13,8 +13,9 @@ use coqui_agentic_peer::link::{self, Host as LinkHost, Options, Services};
 use coqui_agentic_peer::mux::{Limits, Mux, Side};
 use coqui_agentic_peer::peers::{NoEvents, PeerStore};
 use coqui_peer_webcrypto::{Identity, PeerId, Trust, WebCrypto};
-use coqui_web_channel::websocket::{Dialer as WsDialer, Frames, Listener};
-use coqui_web_channel::{Channel as _, Dialer as _, Kind};
+use coqui_transport::Channel as _;
+use coqui_transport_web::websocket::{Dialer as WsDialer, Frames, Listener, ServerTls};
+use coqui_transport_web::{Dialer as _, Kind, Limits as WebLimits};
 
 pub const WAIT: Duration = Duration::from_secs(10);
 /// The channel limit once a peer is proven.
@@ -77,6 +78,13 @@ impl Setup {
     }
 }
 
+/// What a channel starts with while its peer has proved nothing.
+fn proof_limits() -> WebLimits {
+    let mut limits = WebLimits::default();
+    limits.max_message = auth::MAX_PROOF_MESSAGE;
+    limits
+}
+
 /// The answering end: accepts connections, proves each peer, and serves its link.
 pub struct Host {
     pub address: SocketAddr,
@@ -88,12 +96,11 @@ pub struct Host {
 impl Host {
     pub fn start(setup: Setup) -> Self {
         let id = setup.identity.peer_id();
-        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), None)
-            .unwrap()
-            .with_limits(
-                coqui_web_channel::Limits::default().with_max_message(auth::MAX_PROOF_MESSAGE),
-            )
-            .with_frames(Frames::Binary);
+        let listener = Listener::builder("127.0.0.1:0".parse().unwrap(), ServerTls::Plain)
+            .limits(proof_limits())
+            .frames(Frames::Binary)
+            .build()
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let method = Arc::new(
@@ -169,7 +176,7 @@ impl Drop for Host {
 pub fn over_link<R>(
     host: &Host,
     client: Identity,
-    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>) -> R,
+    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_transport_web::websocket::Channel>>) -> R,
 ) -> R {
     over_link_with(host.url(), host.id, client, Limits::default(), body)
 }
@@ -179,15 +186,17 @@ pub fn over_link_with<R>(
     server: PeerId,
     client: Identity,
     limits: Limits,
-    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_web_channel::websocket::Channel>>) -> R,
+    body: impl FnOnce(&Mux<'_, Sealed<'_, coqui_transport_web::websocket::Channel>>) -> R,
 ) -> R {
     let method = WebCrypto::builder()
         .identity(client)
         .responders(Trust::pinned([server]))
         .build()
         .unwrap();
-    let channel = WsDialer::new()
-        .with_frames(Frames::Binary)
+    let channel = WsDialer::builder()
+        .frames(Frames::Binary)
+        .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     let established = prove_out(

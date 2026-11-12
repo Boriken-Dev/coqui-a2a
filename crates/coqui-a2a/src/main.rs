@@ -16,8 +16,9 @@ use coqui_agentic_peer::mux::{Heartbeat, Limits, Mux, Side};
 use coqui_agentic_peer::{Error, home};
 use coqui_peer_tls as tls;
 use coqui_peer_webcrypto::TrustStore;
-use coqui_web_channel::websocket::{Dialer, Frames};
-use coqui_web_channel::{Channel as _, Dialer as _, Failure, Kind};
+use coqui_transport::{Channel as _, Failure};
+use coqui_transport_web::websocket::{Dialer, Frames};
+use coqui_transport_web::{Dialer as _, Kind};
 use url::Url;
 
 /// The largest message on the link, which A2A results and cards fit within.
@@ -151,10 +152,11 @@ fn loopback(args: &Loopback_) -> Result<(), String> {
         println!("{}", file.display());
     }
 
-    let mut dialer = Dialer::new().with_frames(Frames::Binary);
+    let mut dialer = Dialer::builder().frames(Frames::Binary);
     if args.url.scheme() == "wss" {
-        dialer = dialer.with_tls(tls_client(args.ca_file.as_ref())?);
+        dialer = dialer.tls(tls_client(args.ca_file.as_ref())?);
     }
+    let mut dialer = dialer.build().map_err(|error| error.to_string())?;
     let mut wait = Duration::from_secs(1);
     loop {
         match dialer.dial(Kind::WebSocket, &args.url, DIAL_TIMEOUT) {

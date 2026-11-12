@@ -450,7 +450,8 @@ dependencies = [
  "coqui-peer",
  "coqui-peer-tls",
  "coqui-peer-webcrypto",
- "coqui-web-channel",
+ "coqui-transport",
+ "coqui-transport-web",
  "futures-util",
  "hyper",
  "hyper-util",
@@ -477,13 +478,13 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=2966a25c956678e44e23faf3757d2b34c6a769f3#2966a25c956678e44e23faf3757d2b34c6a769f3"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=8dad1766ba1b925f2bee9ebd403805e42e6afc47#8dad1766ba1b925f2bee9ebd403805e42e6afc47"
 dependencies = [
  "coqui-builder",
  "coqui-peer",
  "coqui-peer-noise",
  "coqui-peer-webcrypto",
- "coqui-web-channel",
+ "coqui-transport",
  "mdns-sd",
  "serde_json",
  "socket2",
@@ -571,10 +572,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "coqui-web-channel"
+name = "coqui-transport"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-web-channel.git?rev=0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca#0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca"
+source = "git+https://github.com/Boriken-Dev/coqui-transport?rev=1283116a22de6a8918faa3d0ebd78b8b6777ff0a#1283116a22de6a8918faa3d0ebd78b8b6777ff0a"
 dependencies = [
+ "coqui-builder",
+]
+
+[[package]]
+name = "coqui-transport-web"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/coqui-transport-web?rev=c8df84264ff8e60907f5cedf269104e91d5add22#c8df84264ff8e60907f5cedf269104e91d5add22"
+dependencies = [
+ "coqui-builder",
+ "coqui-transport",
  "mio",
  "rustls",
  "socket2",

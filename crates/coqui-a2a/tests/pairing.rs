@@ -15,8 +15,9 @@ use coqui_agentic_peer::pairing;
 use coqui_agentic_peer::peers::{FilePeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
 use coqui_peer_webcrypto::{Identity, Trust, TrustStore};
-use coqui_web_channel::websocket::{Dialer, Frames, Listener};
-use coqui_web_channel::{Channel as _, Dialer as _, Kind};
+use coqui_transport::Channel as _;
+use coqui_transport_web::websocket::{Dialer, Frames, Listener, ServerTls};
+use coqui_transport_web::{Dialer as _, Kind, Limits};
 use support::agent::{Echo, user};
 use support::link::{Host, Setup, WAIT, over_link_with};
 
@@ -29,6 +30,13 @@ fn temp(name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// What a channel starts with while its peer has proved nothing.
+fn proof_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_message = auth::MAX_PROOF_MESSAGE;
+    limits
+}
+
 #[test]
 fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pairing() {
     let dir = temp("paired");
@@ -38,12 +46,11 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
     let client_store = TrustStore::open(&dir.join("client-trust")).unwrap();
 
     // The one pairing, with a PIN, over a real WebSocket.
-    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), None)
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_limits(
-            coqui_web_channel::Limits::default().with_max_message(auth::MAX_PROOF_MESSAGE),
-        );
+    let listener = Listener::builder("127.0.0.1:0".parse().unwrap(), ServerTls::Plain)
+        .frames(Frames::Binary)
+        .limits(proof_limits())
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let desk = pairing::desk().unwrap();
     let pin = desk.show_pin().unwrap().pin;
@@ -56,8 +63,10 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
             paired.map(|paired| paired.peer.id().to_string())
         })
     };
-    let channel = Dialer::new()
-        .with_frames(Frames::Binary)
+    let channel = Dialer::builder()
+        .frames(Frames::Binary)
+        .build()
+        .unwrap()
         .dial(
             Kind::WebSocket,
             &format!("ws://{address}/pair").parse().unwrap(),
