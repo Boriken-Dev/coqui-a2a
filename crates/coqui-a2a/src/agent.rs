@@ -26,18 +26,26 @@ pub type Events = Box<dyn Iterator<Item = Result<StreamResponse, A2aError>> + Se
 pub struct Watch(Arc<AtomicBool>);
 
 impl Watch {
+    /// An open watch.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Whether nobody is listening.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn close(&self) {
+    /// Says nobody is listening. Every clone sees it, and it cannot be undone. A host that calls
+    /// its own agent through [`Caller::local`] closes the watch to stop an operation it started.
+    pub fn close(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
 }
 
-/// Who is calling, as the link proved it.
+/// Who is calling: the peer a link proved, or the host itself, calling in process.
 #[derive(Clone, Copy)]
 pub struct Caller<'a> {
     /// The peer, as its proof showed. This is the authentication.
@@ -46,7 +54,7 @@ pub struct Caller<'a> {
     pub claims: &'a BTreeMap<String, String>,
     /// The request's service parameters, which hold an agent's own token if it wants one.
     pub service_parameters: &'a ServiceParameters,
-    stream: &'a dyn LinkStream,
+    stream: Option<&'a dyn LinkStream>,
     watch: &'a Watch,
 }
 
@@ -71,7 +79,31 @@ impl<'a> Caller<'a> {
             peer,
             claims,
             service_parameters,
-            stream,
+            stream: Some(stream),
+            watch,
+        }
+    }
+
+    /// A caller that is not on a link: a host calling its own agent through [`Server::call`] or
+    /// [`Server::stream`](crate::Server::stream).
+    ///
+    /// `peer` is the identity the host answers to the agent, which authorizes by it exactly as
+    /// for a peer a link proved; nothing here proves it, so it is as true as the host's own code.
+    /// The caller is open until `watch` is closed.
+    ///
+    /// [`Server::call`]: crate::Server::call
+    #[must_use]
+    pub fn local(
+        peer: &'a str,
+        claims: &'a BTreeMap<String, String>,
+        service_parameters: &'a ServiceParameters,
+        watch: &'a Watch,
+    ) -> Self {
+        Self {
+            peer,
+            claims,
+            service_parameters,
+            stream: None,
             watch,
         }
     }
@@ -80,7 +112,10 @@ impl<'a> Caller<'a> {
     /// it is not.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.watch.is_closed() && self.stream.life() == StreamLife::Open
+        !self.watch.is_closed()
+            && self
+                .stream
+                .is_none_or(|stream| stream.life() == StreamLife::Open)
     }
 
     /// A handle an [`Events`] iterator keeps to learn when to stop.

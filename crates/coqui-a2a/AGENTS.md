@@ -9,7 +9,7 @@ Header-file-style reference for the `coqui-a2a` crate: every public item with it
 
 MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-agentic-peer`, `coqui-transport`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-agentic-peer`'s. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
 
-Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `loopback` (feature).
+Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Reply`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `loopback` (feature).
 
 ## Constants (`coqui_a2a`)
 
@@ -36,7 +36,8 @@ pub type Events = Box<dyn Iterator<Item = Result<StreamResponse, A2aError>> + Se
 pub struct Caller<'a> { pub peer: &'a str, pub claims: &'a BTreeMap<String, String>, pub service_parameters: &'a ServiceParameters }   // Copy
 pub fn Caller::is_open(&self) -> bool          // false once the client left, the link went or the operation ended
 pub fn Caller::watch(&self) -> Watch           // a handle an Events iterator keeps
-pub fn Watch::is_closed(&self) -> bool         // Clone
+pub fn Caller::local(peer: &str, claims: &BTreeMap<String, String>, service_parameters: &ServiceParameters, watch: &Watch) -> Caller   // a caller in process; open until `watch` closes
+pub fn Watch::new() -> Watch;  pub fn Watch::is_closed(&self) -> bool;  pub fn Watch::close(&self)   // Clone; closing is for good and every clone sees it
 
 pub struct Server;                              // Clone
 pub fn Server::new(agent: impl Agent + 'static) -> Server
@@ -45,9 +46,14 @@ pub fn Server::with_url(self, url: impl Into<String>) -> Server        // the `u
 pub fn Server::handler(self) -> coqui_agentic_peer::link::Handler
 pub fn Server::serving(self, services: Services) -> Services           // adds PROTOCOL
 pub fn Server::serve(&self, stream: &dyn LinkStream, accepted: &Accepted)
+pub fn Server::call(&self, caller: &Caller<'_>, method: Method, params: Value) -> Result<Reply, A2aError>     // in process; operations that answer once
+pub fn Server::stream(&self, caller: &Caller<'_>, method: Method, params: Value) -> Result<Events, A2aError>  // in process; SendStreamingMessage and SubscribeToTask
+pub enum Reply { Card(AgentCard), Message(SendMessageResponse), Task(Task), Tasks(ListTasksResponse) }          // non_exhaustive, Serialize
 pub struct ServerLimits { pub max_request: usize, pub request_timeout: Duration, pub reader_stall: Duration }   // non_exhaustive, Default: 1 MiB, 10 s, 30 s
 ```
 
+- `call` and `stream` run the checks `serve` runs, in the order it runs them, and answer the error a link would: `VersionNotSupported`, `ExtensionSupportRequired`, `PushNotificationNotSupported`, `UnsupportedOperation` for a streaming or extended-card call the card does not declare, `Internal` for a panic. A streaming method through `call`, or the reverse, is `InvalidRequest` before the agent runs. The card `call` answers has no webhooks and no link interface. `stream`'s iterator ends as a link's stream does (after the item that ends the task, a first message, or an error) and does not close the caller's `Watch` when dropped: the host closes it.
+- `Caller::local`'s `peer` is whatever the host says, as true as the host's own code; nothing proves it. The agent authorizes by it as for a proven peer.
 - Each stream runs on a thread of the link's, one operation per stream. A panic in an agent method is `InternalError` for that operation.
 - Before an agent method runs the server checks the method, `a2a-version` (major 1), required extensions, streaming and extended-card capabilities against the card, and refuses any push-notification request. The card the server serves has `capabilities.pushNotifications` false and an interface for this binding first.
 - A stream of items ends after the item that puts the task in a terminal state, or after a first item that is a message.

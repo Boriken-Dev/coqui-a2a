@@ -16,7 +16,7 @@ pub mod wire;
 pub use agent::{Agent, Caller, Events, Watch};
 pub use client::{Client, ClientError, ClientTimeouts};
 pub use error::{A2aError, ErrorKind};
-pub use server::{Server, ServerLimits};
+pub use server::{Reply, Server, ServerLimits};
 
 /// The token of the stream protocol, for [`coqui_agentic_peer::link::Services::with`] and a grant.
 pub const PROTOCOL: &str = "a2a/1";

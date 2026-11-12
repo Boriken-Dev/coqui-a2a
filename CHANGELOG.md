@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `vectors/binding.json` and `scripts/sdk-check.mjs`, which runs `@a2a-js/sdk` 1.3.0 through the command.
 - `coqui-a2a loopback` proves by its identity's method, Noise or WebCrypto, which coqui-agentic-peer keeps with the identity; a new identity is Noise's.
 
+- `Caller::local` and `Server::call` / `Server::stream`: a host calls its own agent in process and meets the checks a link meets (method, version, required extensions, push notifications, the card's streaming and extended-card capabilities, a panic as `InternalError`), with the same errors. `Server::serve` runs the same checks, in the same order. `Watch::new` and `Watch::close` are public, and `Reply` is the answer of a call.
+
 ### Changed
 
 - The channel crate is `coqui-transport` (`coqui_transport::{Channel, Failure}`, pinned at `1283116`), replacing `coqui-web-channel`; the command dials with `coqui-transport-web` (`c8df842`, feature `cli`) and coqui-agentic-peer is at `8dad176`, which pins the same. The library's public API is unchanged: its types are generic over `coqui_transport::Channel`.

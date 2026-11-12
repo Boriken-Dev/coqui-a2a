@@ -14,7 +14,8 @@ use crate::agent::{Agent, Caller, Events, Watch};
 use crate::error::{A2aError, ErrorKind};
 use crate::model::{
     AgentCard, AgentInterface, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest,
-    ListTasksRequest, SendMessageRequest, StreamResponse, SubscribeToTaskRequest, params_as,
+    ListTasksRequest, ListTasksResponse, SendMessageRequest, SendMessageResponse, StreamResponse,
+    SubscribeToTaskRequest, Task, params_as,
 };
 use crate::wire::{Method, Request, Response};
 use crate::{A2A_VERSION, BINDING, PROTOCOL};
@@ -40,6 +41,21 @@ impl Default for ServerLimits {
             reader_stall: Duration::from_secs(30),
         }
     }
+}
+
+/// What a call that does not stream answers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum Reply {
+    /// `GetAgentCard` and `GetExtendedAgentCard`.
+    Card(AgentCard),
+    /// `SendMessage`.
+    Message(SendMessageResponse),
+    /// `GetTask` and `CancelTask`.
+    Task(Task),
+    /// `ListTasks`.
+    Tasks(ListTasksResponse),
 }
 
 /// Serves an [`Agent`] over `a2a/1` streams.
@@ -94,6 +110,65 @@ impl Server {
     #[must_use]
     pub fn serving(self, services: Services) -> Services {
         services.with(PROTOCOL, self.handler())
+    }
+
+    /// Calls the agent in process, as a host reaches its own agent, with the checks a link meets:
+    /// the method, `a2a-version`, required extensions, the card's capabilities and push
+    /// notifications, and a panic in the agent is `InternalError`. `params` is the request's
+    /// `params` member.
+    ///
+    /// Only operations that answer once go through here; a streaming one is [`Server::stream`].
+    /// The card answered has no webhooks and, since the caller is not on a link, no interface for
+    /// one. The authorization of the caller is the agent's, by [`Caller::peer`].
+    ///
+    /// # Errors
+    ///
+    /// The error a link would answer the same request with.
+    pub fn call(
+        &self,
+        caller: &Caller<'_>,
+        method: Method,
+        params: Value,
+    ) -> Result<Reply, A2aError> {
+        let card = self.admit(caller, method)?;
+        if method.streams() {
+            return Err(form_error(method, true));
+        }
+        match self.invoke(caller, method, card, params)? {
+            Outcome::Reply(Reply::Card(card)) => Ok(Reply::Card(without_webhooks(card))),
+            Outcome::Reply(reply) => Ok(reply),
+            Outcome::Events(_) => Err(A2aError::standard(ErrorKind::Internal)),
+        }
+    }
+
+    /// As [`Server::call`], for `SendStreamingMessage` and `SubscribeToTask`.
+    ///
+    /// The iterator ends after the item that puts the task in a terminal state, after a first item
+    /// that is a message, and after an error, as a link's stream does. Nothing closes the caller's
+    /// [`Watch`] when the iterator is dropped: the host does when it stops reading, since only it
+    /// knows whether the watch is shared. A quiet iterator returns soon after the watch closes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Server::call`].
+    pub fn stream(
+        &self,
+        caller: &Caller<'_>,
+        method: Method,
+        params: Value,
+    ) -> Result<Events, A2aError> {
+        let card = self.admit(caller, method)?;
+        if !method.streams() {
+            return Err(form_error(method, false));
+        }
+        match self.invoke(caller, method, card, params)? {
+            Outcome::Events(events) => Ok(Box::new(Bounded {
+                events,
+                first: true,
+                done: false,
+            })),
+            Outcome::Reply(_) => Err(A2aError::standard(ErrorKind::Internal)),
+        }
     }
 
     /// Answers one stream: reads its request, runs it, and ends it. Returns when the operation is
@@ -164,10 +239,30 @@ impl Server {
             stream,
             &watch,
         );
-        let card = guarded_value(|| self.agent.agent_card(&caller))?;
+        let card = self.admit(&caller, method)?;
+        if let Some(extra) = excess(stream) {
+            return Err(extra);
+        }
+        match self.invoke(&caller, method, card, params)? {
+            Outcome::Reply(reply) => {
+                let reply = match reply {
+                    Reply::Card(card) => Reply::Card(self.link_card(card)),
+                    other => other,
+                };
+                self.unary(stream, id, Ok(reply))
+            }
+            Outcome::Events(events) => self.pump(stream, &id, events, &watch),
+        }
+    }
+
+    /// The checks before any agent method but the card, shared by a link and a call in process so
+    /// that both meet them in this order: the version and extensions, push notifications, and the
+    /// capabilities the card declares.
+    fn admit(&self, caller: &Caller<'_>, method: Method) -> Result<AgentCard, A2aError> {
+        let card = guarded_value(|| self.agent.agent_card(caller))?;
         if method != Method::GetAgentCard {
-            check_version(&service_parameters)?;
-            check_extensions(&card, &service_parameters)?;
+            check_version(caller.service_parameters)?;
+            check_extensions(&card, caller.service_parameters)?;
         }
         if method.is_push() {
             return Err(A2aError::standard(ErrorKind::PushNotificationNotSupported));
@@ -186,46 +281,54 @@ impl Server {
                 "this agent has no extended card",
             ));
         }
-        if let Some(extra) = excess(stream) {
-            return Err(extra);
-        }
+        Ok(card)
+    }
+
+    /// Reads the parameters and runs the agent's method. A card is as the agent made it.
+    fn invoke(
+        &self,
+        caller: &Caller<'_>,
+        method: Method,
+        card: AgentCard,
+        params: Value,
+    ) -> Result<Outcome, A2aError> {
         let agent = &*self.agent;
-        match method {
-            Method::GetAgentCard => self.unary(stream, id, Ok(self.link_card(card))),
+        let reply = match method {
+            Method::GetAgentCard => Reply::Card(card),
             Method::SendMessage => {
                 let request = send_request(params)?;
-                self.unary(stream, id, guarded(|| agent.send_message(&caller, request)))
+                Reply::Message(guarded(|| agent.send_message(caller, request))?)
             }
             Method::SendStreamingMessage => {
                 let request = send_request(params)?;
-                let events = guarded(|| agent.send_streaming_message(&caller, request))?;
-                self.pump(stream, &id, events, &watch)
+                let events = guarded(|| agent.send_streaming_message(caller, request))?;
+                return Ok(Outcome::Events(events));
             }
             Method::GetTask => {
                 let request: GetTaskRequest = params_as(params)?;
-                self.unary(stream, id, guarded(|| agent.get_task(&caller, request)))
+                Reply::Task(guarded(|| agent.get_task(caller, request))?)
             }
             Method::ListTasks => {
                 let request: ListTasksRequest = params_as(params)?;
-                self.unary(stream, id, guarded(|| agent.list_tasks(&caller, request)))
+                Reply::Tasks(guarded(|| agent.list_tasks(caller, request))?)
             }
             Method::CancelTask => {
                 let request: CancelTaskRequest = params_as(params)?;
-                self.unary(stream, id, guarded(|| agent.cancel_task(&caller, request)))
+                Reply::Task(guarded(|| agent.cancel_task(caller, request))?)
             }
             Method::SubscribeToTask => {
                 let request: SubscribeToTaskRequest = params_as(params)?;
-                let events = guarded(|| agent.subscribe_to_task(&caller, request))?;
-                self.pump(stream, &id, events, &watch)
+                let events = guarded(|| agent.subscribe_to_task(caller, request))?;
+                return Ok(Outcome::Events(events));
             }
             Method::GetExtendedAgentCard => {
                 let request: GetExtendedAgentCardRequest = params_as(params)?;
-                let card = guarded(|| agent.get_extended_agent_card(&caller, request))?;
-                self.unary(stream, id, Ok(self.link_card(card)))
+                Reply::Card(guarded(|| agent.get_extended_agent_card(caller, request))?)
             }
-            // Handled above: the push operations never reach an agent.
-            _ => Err(A2aError::standard(ErrorKind::MethodNotFound)),
-        }
+            // The push operations are refused by `admit` and never reach an agent.
+            _ => return Err(A2aError::standard(ErrorKind::MethodNotFound)),
+        };
+        Ok(Outcome::Reply(reply))
     }
 
     /// The card as this binding serves it: the interface that names the link first, and no
@@ -467,6 +570,70 @@ fn too_large() -> A2aError {
 
 fn stream_open(stream: &dyn LinkStream) -> bool {
     stream.life() == StreamLife::Open
+}
+
+/// What a method of the agent answered.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an outcome is built once and moved at once"
+)]
+enum Outcome {
+    Reply(Reply),
+    Events(Events),
+}
+
+/// The refusal of an operation asked through the form that does not carry it.
+fn form_error(method: Method, called: bool) -> A2aError {
+    let (what, instead) = if called {
+        ("streams", "Server::stream")
+    } else {
+        ("answers once", "Server::call")
+    };
+    A2aError::new(
+        ErrorKind::InvalidRequest,
+        format!("{} {what}: use {instead}", method.name()),
+    )
+}
+
+/// A card as a caller that is not on a link is shown it: no webhooks.
+fn without_webhooks(mut card: AgentCard) -> AgentCard {
+    card.capabilities.push_notifications = Some(false);
+    card
+}
+
+/// An agent's events for a caller in process, held to the rules of a link's stream: they end
+/// after the item that ends the task, after a first message and after an error, and a panic in the
+/// agent is an error.
+struct Bounded {
+    events: Events,
+    first: bool,
+    done: bool,
+}
+
+impl Iterator for Bounded {
+    type Item = Result<StreamResponse, A2aError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let item = match guarded_value(|| self.events.next()) {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                self.done = true;
+                return None;
+            }
+            Err(error) => Err(error),
+        };
+        self.done = match &item {
+            Ok(item) => {
+                item.ends_task() || (self.first && matches!(item, StreamResponse::Message(_)))
+            }
+            Err(_) => true,
+        };
+        self.first = false;
+        Some(item)
+    }
 }
 
 /// How a response went.

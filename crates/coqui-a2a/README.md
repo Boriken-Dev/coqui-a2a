@@ -13,6 +13,7 @@
 - A table of every A2A error type to its wire form, walked by a test.
 - The link's proof is the authentication. An agent's own token still travels, in service parameters.
 - `coqui-a2a loopback`: a standard HTTP JSON-RPC endpoint on a loopback address, so a stock A2A client or SDK works on a link.
+- `Server::call` and `Server::stream`: a host calls its own agent in process, through the checks a link meets, as a `Caller::local`.
 
 ## Installation
 
@@ -107,7 +108,7 @@ coqui-a2a loopback --url ws://127.0.0.1:9000/link --peer sha256:<the agent's pee
 
 | Module | Purpose |
 | --- | --- |
-| `coqui_a2a` | `PROTOCOL`, `BINDING`, `Agent`, `Server`, `Client` and their errors |
+| `coqui_a2a` | `PROTOCOL`, `BINDING`, `Agent`, `Caller`, `Server`, `Reply`, `Client` and their errors |
 | `model` | the A2A data model as serde types |
 | `wire` | requests, responses and service parameters of the binding |
 | `error` | every A2A error type, its code and its wire form |
