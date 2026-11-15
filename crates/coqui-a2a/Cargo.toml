@@ -28,7 +28,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "8dad1766ba1b925f2bee9ebd403805e42e6afc47" }
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "916ca63524cbe6d994413a95da9c7c61c7302bce" }
 coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "1283116a22de6a8918faa3d0ebd78b8b6777ff0a", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
