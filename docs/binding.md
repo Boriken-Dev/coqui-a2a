@@ -28,7 +28,7 @@ An Agent Card announces the binding with one entry of `supportedInterfaces`:
 
 ## What a link is
 
-A link is a proven, sealed connection between two peers that carries named, ordered, flow-controlled streams. It is specified, with its frames, in [`docs/link.md` of coqui-agentic-peer](https://boriken-dev.github.io/coqui-agentic-peer/link/). This binding needs only this of it:
+A link is a proven, sealed connection between two peers that carries named, ordered, flow-controlled streams. It is specified, with its frames, in [`docs/link.md` of coqui-link](https://github.com/Boriken-Dev/coqui-link/blob/main/docs/link.md). This binding needs only this of it:
 
 - a stream is opened with a protocol token and carries whole messages in order, in each direction;
 - either side can stop sending and go on reading (`finish`), which the other side sees as the end of the messages after everything that was sent. Only `finish` says that what was sent is whole: a stream or a link closed in order does not;

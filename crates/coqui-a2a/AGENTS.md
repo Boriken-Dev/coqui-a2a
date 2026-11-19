@@ -5,10 +5,10 @@ Header-file-style reference for the `coqui-a2a` crate: every public item with it
 | Feature | Adds | Default |
 | --- | --- | --- |
 | `tasks` | module `tasks`: a `TaskStore` for an agent's tasks (std only) | off |
-| `loopback` | module `loopback`: an HTTP endpoint on a loopback address (`axum`, `hyper`, `hyper-util`, `tokio`, `futures-util`, `subtle`, `serde_json/raw_value`) | off |
-| `cli` | the `coqui-a2a` command (`loopback`, `clap`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `rustls`, `url`, `coqui-transport-web`) | off |
+| `loopback` | module `loopback`: an HTTP endpoint on a loopback address (`coqui-link/forward`, `axum`, `hyper`, `hyper-util`, `tokio`, `futures-util`, `subtle`, `serde_json/raw_value`) | off |
+| `cli` | the `coqui-a2a` command (`loopback`, `coqui-link/sealed`, `coqui-agentic-peer`, `clap`, `coqui-peer`, `coqui-peer-webcrypto`, `coqui-peer-tls`, `rustls`, `url`, `coqui-transport-web`) | off |
 
-MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-agentic-peer`, `coqui-transport`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-agentic-peer`'s. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
+MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. A default build depends on `coqui-link` (by revision, no features), `coqui-transport`, `serde`, `serde_json` and `time`. No `unsafe` code. The crate holds the mapping of A2A onto a link and no proof, pairing, sealing or discovery: those are `coqui-link`'s, and discovery and the user's home `coqui-agentic-peer`'s, which only the command uses. The wire is specified in the binding page (<https://boriken-dev.github.io/coqui-a2a/binding/>).
 
 Imports: the root re-exports `PROTOCOL`, `BINDING`, `A2A_VERSION`, `Agent`, `Caller`, `Events`, `Watch`, `Server`, `ServerLimits`, `Reply`, `Client`, `ClientError`, `ClientTimeouts`, `A2aError`, `ErrorKind`. Public modules: `agent`, `client`, `error`, `model`, `server`, `wire`, and `tasks`, `loopback` (features).
 
@@ -46,7 +46,7 @@ pub struct Server;                              // Clone
 pub fn Server::new(agent: impl Agent + 'static) -> Server
 pub fn Server::with_limits(self, limits: ServerLimits) -> Server
 pub fn Server::with_url(self, url: impl Into<String>) -> Server        // the `url` of the interface added to the card; default "coqui-agentic-peer:"
-pub fn Server::handler(self) -> coqui_agentic_peer::link::Handler
+pub fn Server::handler(self) -> coqui_link::link::Handler
 pub fn Server::serving(self, services: Services) -> Services           // adds PROTOCOL
 pub fn Server::serve(&self, stream: &dyn LinkStream, accepted: &Accepted)
 pub fn Server::call(&self, caller: &Caller<'_>, method: Method, params: Value) -> Result<Reply, A2aError>     // in process; operations that answer once

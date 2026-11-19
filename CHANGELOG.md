@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the library is on [`coqui-link`](https://github.com/Boriken-Dev/coqui-link) (`40123baa`) and no longer depends on `coqui-agentic-peer`, whose link code moved there: `mux`, `link`, `peers`, `auth`, `pairing` and `forward` are `coqui_link`'s, so a host imports `coqui_link::link::Handler`, `coqui_link::mux::Mux` and the like. `coqui-agentic-peer` (`161307f9`, its `home`) is a dependency of feature `cli` only, and the loopback endpoint needs `coqui-link`'s `forward`, the command its `sealed`. The wire is unchanged: the binding identifier and `coqui-agentic-peer:` keep their spelling.
+
 ### Added
 
 - The binding `https://boriken.dev/a2a/bindings/coqui-agentic-peer/v1` for A2A 1.0, specified in `docs/binding.md`: one `a2a/1` stream per operation, A2A's JSON in JSON-RPC form, service parameters in the request, errors as JSON-RPC errors with `ErrorInfo`, the link's proof as the authentication, and push notifications declared unsupported.

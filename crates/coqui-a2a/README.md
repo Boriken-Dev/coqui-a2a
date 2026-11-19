@@ -4,7 +4,7 @@
 [![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://boriken-dev.github.io/coqui-a2a/)
 [![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-a2a/test.yml)](https://github.com/Boriken-Dev/coqui-a2a/actions/workflows/test.yml)
 
-**A2A runs on a link a peer has already proved, as one more capability, with no second pairing.** The crate is the client and server sides of an [A2A custom protocol binding](https://boriken-dev.github.io/coqui-a2a/binding/) over [`coqui-agentic-peer`](https://github.com/Boriken-Dev/coqui-agentic-peer), and a command that lets unmodified A2A software use such a link through a loopback HTTP endpoint. Documentation is at <https://boriken-dev.github.io/coqui-a2a/>.
+**A2A runs on a link a peer has already proved, as one more capability, with no second pairing.** The crate is the client and server sides of an [A2A custom protocol binding](https://boriken-dev.github.io/coqui-a2a/binding/) over [`coqui-link`](https://github.com/Boriken-Dev/coqui-link), and a command that lets unmodified A2A software use such a link through a loopback HTTP endpoint. Documentation is at <https://boriken-dev.github.io/coqui-a2a/>.
 
 ## Features
 
@@ -27,10 +27,10 @@ cargo add --git https://github.com/Boriken-Dev/coqui-a2a coqui-a2a
 | Feature | Adds |
 | --- | --- |
 | `tasks` | the `tasks` module: a `TaskStore` for an agent's tasks, their owners, subscribers and limits (no dependency) |
-| `loopback` | the `loopback` module: an HTTP endpoint on a loopback address (`axum`, `hyper`, `tokio`) |
-| `cli` | the `coqui-a2a` command (`loopback`, `clap`, the link's identity and TLS pieces) |
+| `loopback` | the `loopback` module: an HTTP endpoint on a loopback address (`axum`, `hyper`, `tokio`, and `coqui-link`'s `forward`) |
+| `cli` | the `coqui-a2a` command (`loopback`, `clap`, `coqui-link`'s `sealed`, `coqui-agentic-peer`'s home, the link's identity and TLS pieces) |
 
-A default build depends on `coqui-agentic-peer`, `coqui-transport`, `serde`, `serde_json` and `time`. MSRV is Rust 1.89.
+A default build depends on `coqui-link`, `coqui-transport`, `serde`, `serde_json` and `time`. MSRV is Rust 1.89.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ A client, over the mux of a link that has proved its peer:
 ```rust,no_run
 use coqui_a2a::model::{Message, Role, SendMessageRequest};
 use coqui_a2a::{Client, ClientError};
-use coqui_agentic_peer::mux::Mux;
+use coqui_link::mux::Mux;
 use coqui_transport::Channel;
 
 fn ask<C: Channel>(mux: &Mux<'_, C>) -> Result<(), ClientError> {
@@ -60,7 +60,7 @@ A server: implement [`Agent`](https://boriken-dev.github.io/coqui-a2a/rust/coqui
 use coqui_a2a::error::A2aError;
 use coqui_a2a::model::{AgentCard, SendMessageRequest, SendMessageResponse};
 use coqui_a2a::{Agent, Caller, Server};
-use coqui_agentic_peer::link::Services;
+use coqui_link::link::Services;
 
 struct Mute;
 

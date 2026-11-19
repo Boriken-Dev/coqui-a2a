@@ -1,6 +1,6 @@
 # coqui-a2a — repository orientation
 
-A2A running on a proven `coqui-agentic-peer` link, as an A2A custom protocol binding, and a loopback command so unmodified A2A software can use such a link.
+A2A running on a proven `coqui-link` link, as an A2A custom protocol binding, and a loopback command so unmodified A2A software can use such a link.
 
 | Shipped header | Covers |
 | --- | --- |
@@ -33,7 +33,7 @@ COQUI_A2A_BIN=target/debug/coqui-a2a COQUI_A2A_ECHO=target/debug/examples/echo_s
 
 ## Rules
 
-- **This crate holds only the mapping of A2A onto a link.** Proof, pairing, sealing, channels, discovery and the companion are `coqui-agentic-peer`'s; a test (`tests/layering.rs`) fails when the library names one of its own. A need for something from the link crate is a change there.
+- **This crate holds only the mapping of A2A onto a link.** Proof, pairing, sealing, channels and grants are `coqui-link`'s, and discovery, the companion and the user's home `coqui-agentic-peer`'s; a test (`tests/layering.rs`) fails when the library names one of its own. A need for something from the link crate is a change there.
 - **The wire is a contract.** A change to a message, a code or a name changes `docs/binding.md` and `vectors/binding.json` in the same commit, and a change that breaks an existing message takes a new binding identifier.
 - **The error table is data.** `ErrorKind::ALL` is the table; `tests/errors.rs` walks it and compares it to the table in `docs/binding.md`.
 - **The link crate is pinned by git revision** in `crates/coqui-a2a/Cargo.toml` and in `[patch.crates-io]` of the root manifest. Move the pins together with `coqui-web-channel` and `coqui-peer-webcrypto`.

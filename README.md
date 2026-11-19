@@ -4,7 +4,7 @@
 [![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://boriken-dev.github.io/coqui-a2a/)
 [![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-a2a/test.yml)](https://github.com/Boriken-Dev/coqui-a2a/actions/workflows/test.yml)
 
-**A2A over a link a peer has already proved, as a custom protocol binding.** A peer paired once for ACP, or anything else on a [`coqui-agentic-peer`](https://github.com/Boriken-Dev/coqui-agentic-peer) link, is granted `a2a/1` and uses A2A on the same connection, with no second pairing. A stream carries A2A's own JSON, and the loopback command lets unmodified A2A software use a link.
+**A2A over a link a peer has already proved, as a custom protocol binding.** A peer paired once for ACP, or anything else on a [`coqui-link`](https://github.com/Boriken-Dev/coqui-link) link, is granted `a2a/1` and uses A2A on the same connection, with no second pairing. A stream carries A2A's own JSON, and the loopback command lets unmodified A2A software use a link.
 
 | Path | What it is |
 | --- | --- |
