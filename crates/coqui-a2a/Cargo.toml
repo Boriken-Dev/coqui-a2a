@@ -1,6 +1,6 @@
 [package]
 name = "coqui-a2a"
-description = "A2A over a proven coqui-agentic-peer link, as a custom protocol binding, with a loopback HTTP command for unmodified A2A software"
+description = "A2A over a link a peer has proved (coqui-link), as a custom protocol binding, with a loopback HTTP command for unmodified A2A software"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,9 +18,9 @@ publish = false
 # `tasks::TaskStore`: the tasks of an agent, their ownership, their subscribers and their limits.
 tasks = []
 # The HTTP JSON-RPC endpoint on a loopback address, for A2A software that knows nothing of links.
-loopback = ["dep:axum", "dep:tokio", "dep:futures-util", "dep:hyper", "dep:hyper-util", "dep:subtle", "serde_json/raw_value"]
+loopback = ["coqui-link/forward", "dep:axum", "dep:tokio", "dep:futures-util", "dep:hyper", "dep:hyper-util", "dep:subtle", "serde_json/raw_value"]
 # The `coqui-a2a` command.
-cli = ["loopback", "dep:clap", "dep:coqui-peer", "dep:coqui-peer-webcrypto", "dep:coqui-peer-tls", "dep:rustls", "dep:url", "dep:coqui-transport-web"]
+cli = ["loopback", "coqui-link/sealed", "dep:coqui-agentic-peer", "dep:clap", "dep:coqui-peer", "dep:coqui-peer-webcrypto", "dep:coqui-peer-tls", "dep:rustls", "dep:url", "dep:coqui-transport-web"]
 
 [[bin]]
 name = "coqui-a2a"
@@ -28,7 +28,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "f45938e8cede85a2a2e00afedea1b4944f7c8a67" }
+coqui-link = { git = "https://github.com/Boriken-Dev/coqui-link", rev = "40123baab01440c0522a27baa7321a31892b3735" }
 coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "2601da58de9cac8f635060e4746864e9b238c6c5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,6 +43,8 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio", "
 # The bearer token's comparison.
 subtle = { version = "2.6", default-features = false, optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
+# The command's home: where this user's identity and trust store live.
+coqui-agentic-peer = { git = "https://github.com/Boriken-Dev/coqui-agentic-peer", rev = "161307f9ebc216a56e21d7407688baa80f442823", optional = true }
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "9146f55dd9fb9be8d6d96f43e17bc7a057ba0681", optional = true }
 # The WebSocket dialer of the command.
 coqui-transport-web = { git = "https://github.com/Boriken-Dev/coqui-transport-web", rev = "df5be67b3a18e23b2d0073eb0f795a49a4221c93", features = ["websocket"], optional = true }
@@ -54,6 +56,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 url = { version = "2.5", optional = true }
 
 [dev-dependencies]
+# The tests prove and pair over the link, and run the loopback endpoint.
+coqui-link = { git = "https://github.com/Boriken-Dev/coqui-link", rev = "40123baab01440c0522a27baa7321a31892b3735", features = ["sealed", "forward"] }
 coqui-acp = { git = "https://github.com/Boriken-Dev/coqui-acp", rev = "af005f0f1b49e0b0ec5dff6a6e9b0bca206d3e83" }
 coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "9146f55dd9fb9be8d6d96f43e17bc7a057ba0681", features = ["pin"] }
 coqui-transport-web = { git = "https://github.com/Boriken-Dev/coqui-transport-web", rev = "df5be67b3a18e23b2d0073eb0f795a49a4221c93", features = ["websocket"] }

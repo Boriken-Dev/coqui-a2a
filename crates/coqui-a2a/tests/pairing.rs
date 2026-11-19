@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::thread;
 
 use coqui_a2a::{Client, ClientError, PROTOCOL, Server};
-use coqui_agentic_peer::auth;
-use coqui_agentic_peer::link::{Services, capabilities};
-use coqui_agentic_peer::mux::LinkStream;
-use coqui_agentic_peer::pairing;
-use coqui_agentic_peer::peers::{FilePeers, PeerRecord, PeerStore};
+use coqui_link::auth;
+use coqui_link::link::{Services, capabilities};
+use coqui_link::mux::LinkStream;
+use coqui_link::pairing;
+use coqui_link::peers::{FilePeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::pair::{CodeAlphabet, Pin};
 use coqui_peer_webcrypto::{Identity, Trust, TrustStore};
 use coqui_transport::Channel as _;
@@ -113,7 +113,7 @@ fn one_pairing_serves_the_first_protocol_and_a_grant_adds_a2a_with_no_second_pai
         host.url(),
         host.id,
         client_identity,
-        coqui_agentic_peer::mux::Limits::default(),
+        coqui_link::mux::Limits::default(),
         |mux| {
             // Proved by the pairing alone: no second pairing and no new key.
             assert_eq!(capabilities(mux, WAIT).unwrap().offers, [OTHER]);

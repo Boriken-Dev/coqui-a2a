@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use coqui_a2a::{PROTOCOL, Server};
-use coqui_agentic_peer::link::Services;
-use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
+use coqui_link::link::Services;
+use coqui_link::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
 
 fn main() -> Result<(), String> {

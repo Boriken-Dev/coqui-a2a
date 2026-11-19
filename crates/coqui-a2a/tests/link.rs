@@ -15,9 +15,9 @@ use coqui_a2a::model::{
 };
 use coqui_a2a::wire::Method;
 use coqui_a2a::{BINDING, Client, ClientError, PROTOCOL, Server, ServerLimits};
-use coqui_agentic_peer::link::{Services, capabilities};
-use coqui_agentic_peer::mux::{LinkStream, StreamEnd};
-use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
+use coqui_link::link::{Services, capabilities};
+use coqui_link::mux::{LinkStream, StreamEnd};
+use coqui_link::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
 use coqui_transport::Channel as _;
 use serde_json::{Value, json};
@@ -385,7 +385,7 @@ fn a_running_stream_ends_as_revoked_when_the_grant_goes() {
 }
 
 fn raw_request(
-    mux: &coqui_agentic_peer::mux::Mux<'_, impl coqui_transport::Channel>,
+    mux: &coqui_link::mux::Mux<'_, impl coqui_transport::Channel>,
     bytes: &[u8],
 ) -> Value {
     let stream = mux.open(PROTOCOL).unwrap();

@@ -447,6 +447,7 @@ dependencies = [
  "clap",
  "coqui-acp",
  "coqui-agentic-peer",
+ "coqui-link",
  "coqui-peer",
  "coqui-peer-tls",
  "coqui-peer-webcrypto",
@@ -478,16 +479,13 @@ dependencies = [
 [[package]]
 name = "coqui-agentic-peer"
 version = "0.0.0-alpha.0"
-source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=f45938e8cede85a2a2e00afedea1b4944f7c8a67#f45938e8cede85a2a2e00afedea1b4944f7c8a67"
+source = "git+https://github.com/Boriken-Dev/coqui-agentic-peer?rev=161307f9ebc216a56e21d7407688baa80f442823#161307f9ebc216a56e21d7407688baa80f442823"
 dependencies = [
- "coqui-builder",
- "coqui-peer",
- "coqui-peer-noise",
+ "coqui-link",
  "coqui-peer-webcrypto",
  "coqui-transport",
  "mdns-sd",
  "serde_json",
- "socket2",
  "url",
 ]
 
@@ -507,6 +505,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "coqui-link"
+version = "0.0.0-alpha.0"
+source = "git+https://github.com/Boriken-Dev/coqui-link?rev=40123baab01440c0522a27baa7321a31892b3735#40123baab01440c0522a27baa7321a31892b3735"
+dependencies = [
+ "coqui-builder",
+ "coqui-peer",
+ "coqui-peer-noise",
+ "coqui-peer-webcrypto",
+ "coqui-transport",
+ "serde_json",
+ "socket2",
 ]
 
 [[package]]

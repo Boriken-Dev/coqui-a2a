@@ -21,7 +21,7 @@ pub use client::{Client, ClientError, ClientTimeouts};
 pub use error::{A2aError, ErrorKind};
 pub use server::{Reply, Server, ServerLimits};
 
-/// The token of the stream protocol, for [`coqui_agentic_peer::link::Services::with`] and a grant.
+/// The token of the stream protocol, for [`coqui_link::link::Services::with`] and a grant.
 pub const PROTOCOL: &str = "a2a/1";
 
 /// The `protocolBinding` of the Agent Card interface that names a link. An identifier nobody

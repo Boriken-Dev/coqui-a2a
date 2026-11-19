@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use coqui_a2a::loopback::{Config, Hub, Loopback, LoopbackError};
 use coqui_a2a::{PROTOCOL, Server};
-use coqui_agentic_peer::link::Services;
-use coqui_agentic_peer::mux::LinkStream;
-use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
+use coqui_link::link::Services;
+use coqui_link::mux::LinkStream;
+use coqui_link::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
 use serde_json::{Value, json};
 use support::agent::Echo;

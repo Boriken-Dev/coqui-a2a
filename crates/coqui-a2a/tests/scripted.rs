@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use coqui_a2a::model::{Message, Role, SendMessageRequest, SendMessageResponse};
 use coqui_a2a::{Client, ClientError};
-use coqui_agentic_peer::mux::{CloseReason, Frame, Limits, Mux, Side};
+use coqui_link::mux::{CloseReason, Frame, Limits, Mux, Side};
 use coqui_transport::{Channel, Failure};
 use serde_json::json;
 

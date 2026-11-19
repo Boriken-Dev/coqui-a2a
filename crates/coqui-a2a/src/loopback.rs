@@ -34,7 +34,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::{get, post};
-use coqui_agentic_peer::mux::{CloseReason, LinkState, Mux};
+use coqui_link::mux::{CloseReason, LinkState, Mux};
 use coqui_transport::{Channel, Failure};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq as _;
@@ -276,7 +276,7 @@ impl Config {
 }
 
 fn is_loopback(ip: IpAddr) -> bool {
-    coqui_agentic_peer::forward::is_loopback(ip)
+    coqui_link::forward::is_loopback(ip)
 }
 
 /// An answer on its way to an HTTP client, and its share of what may wait.
@@ -1551,7 +1551,7 @@ fn kept_requirements(requirements: &Value, schemes: &serde_json::Map<String, Val
 mod tests {
     use std::sync::atomic::AtomicUsize;
 
-    use coqui_agentic_peer::mux::{Frame, Limits, Side};
+    use coqui_link::mux::{Frame, Limits, Side};
 
     use super::*;
 

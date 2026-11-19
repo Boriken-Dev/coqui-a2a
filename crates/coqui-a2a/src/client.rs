@@ -4,7 +4,7 @@ use core::fmt;
 use core::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use coqui_agentic_peer::mux::{Mux, Stream, StreamEnd};
+use coqui_link::mux::{Mux, Stream, StreamEnd};
 use coqui_transport::{Channel, Failure};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

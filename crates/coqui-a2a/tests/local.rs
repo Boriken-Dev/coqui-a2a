@@ -16,8 +16,8 @@ use coqui_a2a::model::{
 use coqui_a2a::server::Reply;
 use coqui_a2a::wire::{Method, ServiceParameters};
 use coqui_a2a::{Agent, Caller, Client, ClientError, Events, PROTOCOL, Server, Watch};
-use coqui_agentic_peer::link::Services;
-use coqui_agentic_peer::peers::{MemoryPeers, PeerRecord, PeerStore};
+use coqui_link::link::Services;
+use coqui_link::peers::{MemoryPeers, PeerRecord, PeerStore};
 use coqui_peer_webcrypto::{Identity, Trust};
 use serde_json::{Value, json};
 use support::link::{Host, Setup, over_link};

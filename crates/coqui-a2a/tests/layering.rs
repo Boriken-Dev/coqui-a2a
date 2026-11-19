@@ -48,7 +48,7 @@ fn dependencies(section: &str) -> Vec<String> {
 #[test]
 fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
     let allowed = [
-        "coqui-agentic-peer",
+        "coqui-link",
         "coqui-transport",
         "serde",
         "serde_json",
@@ -61,6 +61,7 @@ fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
         "hyper-util",
         "subtle",
         // The command line only.
+        "coqui-agentic-peer",
         "coqui-transport-web",
         "clap",
         "coqui-peer",
@@ -73,7 +74,7 @@ fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
         assert!(
             allowed.contains(&dependency.as_str()),
             "{dependency} is not on the list of what this crate may depend on: if it is a proof, \
-             sealing, pairing or discovery primitive, it belongs in coqui-agentic-peer"
+             sealing, pairing or discovery primitive, it belongs in coqui-link, or coqui-agentic-peer for discovery"
         );
     }
     // No hash, cipher, curve or multicast-DNS crate is named here, directly.
@@ -93,8 +94,8 @@ fn the_library_depends_on_the_link_crate_and_no_primitive_of_its_own() {
 fn the_library_source_names_no_proof_pairing_or_discovery_item() {
     let forbidden = [
         "coqui_peer",
-        "coqui_agentic_peer::auth",
-        "coqui_agentic_peer::pairing",
+        "coqui_link::auth",
+        "coqui_link::pairing",
         "coqui_agentic_peer::discovery",
         "coqui_agentic_peer::companion",
         "Sealed",

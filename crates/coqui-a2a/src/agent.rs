@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use coqui_agentic_peer::mux::{LinkStream, StreamLife};
+use coqui_link::mux::{LinkStream, StreamLife};
 
 use crate::error::{A2aError, ErrorKind};
 use crate::model::{

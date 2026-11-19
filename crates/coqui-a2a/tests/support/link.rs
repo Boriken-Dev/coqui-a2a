@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use coqui_agentic_peer::auth::{self, Sealed, prove_out};
-use coqui_agentic_peer::link::{self, Host as LinkHost, Options, Services};
-use coqui_agentic_peer::mux::{Limits, Mux, Side};
-use coqui_agentic_peer::peers::{NoEvents, PeerStore};
+use coqui_link::auth::{self, Sealed, prove_out};
+use coqui_link::link::{self, Host as LinkHost, Options, Services};
+use coqui_link::mux::{Limits, Mux, Side};
+use coqui_link::peers::{NoEvents, PeerStore};
 use coqui_peer_webcrypto::{Identity, PeerId, Trust, WebCrypto};
 use coqui_transport::Channel as _;
 use coqui_transport_web::websocket::{Dialer as WsDialer, Frames, Listener, ServerTls};
